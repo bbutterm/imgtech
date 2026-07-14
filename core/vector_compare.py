@@ -1,13 +1,14 @@
 """Сравнение векторной графики двух страниц PDF.
 
 Подход: векторные примитивы обеих страниц (get_drawings) сэмплируются в
-облака точек с фиксированным шагом. Такое представление инвариантно к
-порядку путей в файле, к разбиению отрезков на части и к способу
-аппроксимации кривых — то есть к «шуму экспорта» из CAD.
+облака точек. Такое представление инвариантно к порядку путей в файле, к
+разбиению отрезков на части и к способу аппроксимации кривых — то есть к
+«шуму экспорта» из CAD.
 
 Дальше:
-1. оценивается глобальный сдвиг между страницами (медиана смещений до
-   ближайших соседей) и страница 1 приводится к координатам страницы 2;
+1. оценивается глобальный сдвиг между страницами (перебор по сетке
+   заполненности + субпиксельное уточнение) и страница 1 приводится к
+   координатам страницы 2;
 2. каждая точка одной страницы ищется в облаке другой с допуском eps —
    несопоставившиеся точки и есть отличия;
 3. несопоставившиеся точки кластеризуются в прямоугольники отличий.
@@ -15,83 +16,134 @@
 Если доля несопоставившихся точек аномально высокая (representations
 несовместимы, а не «всё изменилось»), вызывающий код должен откатиться
 на растровое сравнение — порог отдаётся в результате (unmatched_share).
+
+Горячие места (сопоставление точек, оценка сдвига, кластеризация)
+векторизованы через numpy: клетки сетки кодируются целочисленными
+ключами, поиск кандидатов — searchsorted по отсортированным ключам.
 """
 
-import math
-import statistics
-from collections import defaultdict
+import numpy as np
+
+#смещение и разрядность упаковки индексов клетки в один int64-ключ:
+#key = (cx + _OFF) << 21 | (cy + _OFF); хватает на ~10^6 клеток по каждой оси
+_OFF = 1 << 16
 
 
-def _point(p):
-	return (float(p[0]), float(p[1]))
+def _keys(cells):
+	return ((cells[:, 0] + _OFF) << 21) + (cells[:, 1] + _OFF)
 
 
-def _sample_segment(a, b, step):
-	ax, ay = a
-	bx, by = b
-	n = max(1, int(math.hypot(bx - ax, by - ay) / step))
-	return [(ax + (bx - ax) * i / n, ay + (by - ay) * i / n) for i in range(n + 1)]
+def _ragged(lo, cnt):
+	"""Индексы для развёртки диапазонов [lo[i], lo[i]+cnt[i]): (номер строки, индекс)."""
+	total = int(cnt.sum())
+	rep = np.repeat(np.arange(len(cnt)), cnt)
+	offs = np.arange(total) - np.repeat(np.cumsum(cnt) - cnt, cnt)
+	return rep, lo[rep] + offs
 
 
-def _sample_bezier(p0, p1, p2, p3, step):
+def _sample_segments_np(segs, step):
+	"""Сэмплирует пакет отрезков (N, 4: x0 y0 x1 y1) с шагом step."""
+	a = segs[:, 0:2]
+	b = segs[:, 2:4]
+	n = np.maximum(1, (np.hypot(*(b - a).T) / step).astype(np.int64))
+	cnt = n + 1
+	rep = np.repeat(np.arange(len(segs)), cnt)
+	t = ((np.arange(cnt.sum()) - np.repeat(np.cumsum(cnt) - cnt, cnt)) / n[rep])[:, None]
+	return a[rep] + (b[rep] - a[rep]) * t
+
+
+def _sample_beziers_np(cur, step):
+	"""Сэмплирует пакет кубических Безье (N, 8) с шагом step."""
+	p0, p1, p2, p3 = cur[:, 0:2], cur[:, 2:4], cur[:, 4:6], cur[:, 6:8]
 	#длина ломаной контрольных точек — верхняя оценка длины кривой
-	approx_len = (math.hypot(p1[0] - p0[0], p1[1] - p0[1]) +
-	              math.hypot(p2[0] - p1[0], p2[1] - p1[1]) +
-	              math.hypot(p3[0] - p2[0], p3[1] - p2[1]))
-	n = max(2, int(approx_len / step))
-	pts = []
-	for i in range(n + 1):
-		t = i / n
-		mt = 1 - t
-		x = mt**3 * p0[0] + 3 * mt * mt * t * p1[0] + 3 * mt * t * t * p2[0] + t**3 * p3[0]
-		y = mt**3 * p0[1] + 3 * mt * mt * t * p1[1] + 3 * mt * t * t * p2[1] + t**3 * p3[1]
-		pts.append((x, y))
-	return pts
+	approx = (np.hypot(*(p1 - p0).T) + np.hypot(*(p2 - p1).T) + np.hypot(*(p3 - p2).T))
+	n = np.maximum(2, (approx / step).astype(np.int64))
+	cnt = n + 1
+	rep = np.repeat(np.arange(len(cur)), cnt)
+	t = ((np.arange(cnt.sum()) - np.repeat(np.cumsum(cnt) - cnt, cnt)) / n[rep])[:, None]
+	mt = 1 - t
+	return (mt**3 * p0[rep] + 3 * mt * mt * t * p1[rep] +
+	        3 * mt * t * t * p2[rep] + t**3 * p3[rep])
 
 
 def extract_points(page, step=2.0):
-	"""Сэмплирует всю векторную графику страницы в облако точек."""
-	pts = []
-	for path in page.get_drawings():
+	"""Сэмплирует всю векторную графику страницы в облако точек (N, 2).
+
+	Используется get_cdrawings (сырые кортежи из C) — get_drawings тратит
+	в несколько раз больше времени на обёртку каждого пути в Point/Rect.
+	"""
+	segs = []
+	curves = []
+	for path in page.get_cdrawings():
 		for item in path["items"]:
 			kind = item[0]
 			if kind == "l":
-				pts += _sample_segment(_point(item[1]), _point(item[2]), step)
+				a, b = item[1], item[2]
+				segs.append((a[0], a[1], b[0], b[1]))
 			elif kind == "c":
-				pts += _sample_bezier(_point(item[1]), _point(item[2]),
-				                      _point(item[3]), _point(item[4]), step)
+				p0, p1, p2, p3 = item[1], item[2], item[3], item[4]
+				curves.append((p0[0], p0[1], p1[0], p1[1],
+				               p2[0], p2[1], p3[0], p3[1]))
 			elif kind == "re":
-				r = item[1]
-				corners = [(r.x0, r.y0), (r.x1, r.y0), (r.x1, r.y1), (r.x0, r.y1)]
-				for a, b in zip(corners, corners[1:] + corners[:1]):
-					pts += _sample_segment(a, b, step)
+				x0, y0, x1, y1 = item[1]
+				segs.append((x0, y0, x1, y0))
+				segs.append((x1, y0, x1, y1))
+				segs.append((x1, y1, x0, y1))
+				segs.append((x0, y1, x0, y0))
 			elif kind == "qu":
 				q = item[1]
-				corners = [_point(q.ul), _point(q.ur), _point(q.lr), _point(q.ll)]
+				#порядок углов Quad: ul, ur, ll, lr — периметр обходим как ul-ur-lr-ll
+				corners = (q[0], q[1], q[3], q[2])
 				for a, b in zip(corners, corners[1:] + corners[:1]):
-					pts += _sample_segment(a, b, step)
-	return pts
+					segs.append((a[0], a[1], b[0], b[1]))
+	parts = []
+	if segs:
+		parts.append(_sample_segments_np(np.asarray(segs), step))
+	if curves:
+		parts.append(_sample_beziers_np(np.asarray(curves), step))
+	if not parts:
+		return np.empty((0, 2))
+	return np.concatenate(parts)
 
 
-def _grid(points, cell):
-	g = defaultdict(list)
-	for p in points:
-		g[(int(p[0] // cell), int(p[1] // cell))].append(p)
-	return g
+def _match_mask(pts_a, pts_b, eps):
+	"""Маска: для каждой точки a существует ли точка b на расстоянии <= eps.
 
+	Клетка сетки равна eps, поэтому все кандидаты лежат в 3x3 соседних
+	клетках; кандидаты находятся searchsorted'ом по ключам клеток, после
+	чего проверяется точное расстояние.
+	"""
+	if len(pts_a) == 0:
+		return np.zeros(0, dtype=bool)
+	if len(pts_b) == 0:
+		return np.zeros(len(pts_a), dtype=bool)
 
-def _nearest_in_grid(x, y, grid, cell, max_d2):
-	best_d2 = max_d2
-	best = None
-	cx, cy = int(x // cell), int(y // cell)
+	cb = np.floor(pts_b / eps).astype(np.int64)
+	order = np.argsort(_keys(cb), kind="stable")
+	key_b = _keys(cb)[order]
+	pts_b_sorted = pts_b[order]
+
+	ca = np.floor(pts_a / eps).astype(np.int64)
+	matched = np.zeros(len(pts_a), dtype=bool)
+	eps2 = eps * eps
+
 	for dx in (-1, 0, 1):
 		for dy in (-1, 0, 1):
-			for qx, qy in grid.get((cx + dx, cy + dy), ()):
-				d2 = (qx - x) ** 2 + (qy - y) ** 2
-				if d2 <= best_d2:
-					best_d2 = d2
-					best = (qx, qy)
-	return best
+			todo = np.nonzero(~matched)[0]
+			if len(todo) == 0:
+				break
+			ka = ((ca[todo, 0] + dx + _OFF) << 21) + (ca[todo, 1] + dy + _OFF)
+			lo = np.searchsorted(key_b, ka, "left")
+			hi = np.searchsorted(key_b, ka, "right")
+			cnt = hi - lo
+			has = cnt > 0
+			if not has.any():
+				continue
+			rep, cand = _ragged(lo[has], cnt[has])
+			src = todo[np.nonzero(has)[0][rep]]
+			d2 = ((pts_a[src] - pts_b_sorted[cand]) ** 2).sum(axis=1)
+			matched[src[d2 <= eps2]] = True
+	return matched
 
 
 def estimate_shift(pts_a, pts_b, search_range=8, max_samples=800):
@@ -102,80 +154,120 @@ def estimate_shift(pts_a, pts_b, search_range=8, max_samples=800):
 	сдвига вдоль преобладающего направления линий систематически занижаются.
 	Вместо этого целочисленный сдвиг ищется перебором по сетке заполненности
 	(максимум совпавших точек), а затем уточняется субпиксельно медианой
-	остаточных смещений — при остатке меньше клетки перпендикулярный
-	эффект уже не искажает результат.
+	остаточных смещений до ближайших соседей.
 	"""
-	if not pts_a or not pts_b:
+	if len(pts_a) == 0 or len(pts_b) == 0:
 		return 0.0, 0.0
 
 	#заполненность страницы 2 клетками 1pt, растянутая на соседние клетки,
 	#чтобы покрыть зазоры между сэмплами (шаг сэмплирования > 1pt)
-	occ = set()
-	for x, y in pts_b:
-		cx, cy = int(round(x)), int(round(y))
-		for dx in (-1, 0, 1):
-			for dy in (-1, 0, 1):
-				occ.add((cx + dx, cy + dy))
+	cb = np.round(pts_b).astype(np.int64)
+	d = np.array([-1, 0, 1], dtype=np.int64)
+	gx = cb[:, 0, None, None] + d[None, :, None]
+	gy = cb[:, 1, None, None] + d[None, None, :]
+	occ = np.unique(((gx + _OFF) << 21) + (gy + _OFF))
 
 	stride = max(1, len(pts_a) // max_samples)
 	sample = pts_a[::stride]
+	cs = np.round(sample).astype(np.int64)
 
-	best = (0, 0)
-	best_score = -1
-	for dx in range(-search_range, search_range + 1):
-		for dy in range(-search_range, search_range + 1):
-			score = sum(1 for x, y in sample
-			            if (int(round(x + dx)), int(round(y + dy))) in occ)
-			if score > best_score:
-				best_score = score
-				best = (dx, dy)
+	#все смещения одним вызовом; argmax берёт первый максимум — как и цикл
+	offs = np.array([(dx, dy)
+	                 for dx in range(-search_range, search_range + 1)
+	                 for dy in range(-search_range, search_range + 1)], dtype=np.int64)
+	ks = (((cs[None, :, 0] + offs[:, 0, None] + _OFF) << 21) +
+	      (cs[None, :, 1] + offs[:, 1, None] + _OFF))
+	pos = np.searchsorted(occ, ks.ravel()).clip(max=len(occ) - 1)
+	scores = (occ[pos] == ks.ravel()).reshape(len(offs), -1).sum(axis=1)
+	best = tuple(offs[int(np.argmax(scores))])
 
-	#субпиксельное уточнение
-	grid_b = _grid(pts_b, 2.0)
-	dxs, dys = [], []
-	for x, y in sample:
-		nb = _nearest_in_grid(x + best[0], y + best[1], grid_b, 2.0, 4.0)
-		if nb is not None:
-			dxs.append(nb[0] - (x + best[0]))
-			dys.append(nb[1] - (y + best[1]))
-	if dxs:
-		return best[0] + statistics.median(dxs), best[1] + statistics.median(dys)
-	return float(best[0]), float(best[1])
+	#субпиксельное уточнение: локальный перебор с шагом 0.25pt, счёт — число
+	#точек выборки, у которых есть сосед в радиусе 1pt. Медиана смещений до
+	#«ближайшего» соседа здесь не годится: на осевых линиях ближайший сосед
+	#неоднозначен (равные расстояния влево/вправо вдоль линии), и порядок
+	#разрешения ничьих систематически сдвигает медиану. Перебор симметричен.
+	cell = 1.0
+	cb2 = np.floor(pts_b / cell).astype(np.int64)
+	order = np.argsort(_keys(cb2), kind="stable")
+	key_b = _keys(cb2)[order]
+	pts_b_sorted = pts_b[order]
 
+	def fine_score(off):
+		shifted = sample + off
+		ca = np.floor(shifted / cell).astype(np.int64)
+		hit = np.zeros(len(shifted), dtype=bool)
+		for dx in (-1, 0, 1):
+			for dy in (-1, 0, 1):
+				ka = ((ca[:, 0] + dx + _OFF) << 21) + (ca[:, 1] + dy + _OFF)
+				lo = np.searchsorted(key_b, ka, "left")
+				hi = np.searchsorted(key_b, ka, "right")
+				cnt = hi - lo
+				has = cnt > 0
+				if not has.any():
+					continue
+				rep, cand = _ragged(lo[has], cnt[has])
+				src = np.nonzero(has)[0][rep]
+				d2 = ((shifted[src] - pts_b_sorted[cand]) ** 2).sum(axis=1)
+				hit[src[d2 <= cell * cell]] = True
+		return int(hit.sum())
 
-def _unmatched(points, other_grid, eps):
-	out = []
-	eps2 = eps * eps
-	for x, y in points:
-		if _nearest_in_grid(x, y, other_grid, eps, eps2) is None:
-			out.append((x, y))
-	return out
+	#порядок от нулевого смещения наружу: при равном счёте выигрывает
+	#наименьшая поправка
+	steps = np.arange(-1.25, 1.26, 0.25)
+	offsets = sorted(((dx, dy) for dx in steps for dy in steps),
+	                 key=lambda o: o[0] * o[0] + o[1] * o[1])
+	base_off = np.asarray(best, dtype=float)
+	best_fine = (0.0, 0.0)
+	best_fs = -1
+	for off in offsets:
+		score = fine_score(base_off + np.asarray(off))
+		if score > best_fs:
+			best_fs = score
+			best_fine = off
+	return best[0] + best_fine[0], best[1] + best_fine[1]
 
 
 def cluster_boxes(points, cell=10.0, min_pts=6, pad=3.0):
 	"""Группирует точки в прямоугольники через связные компоненты клеток сетки."""
-	occ = _grid(points, cell)
-	seen = set()
-	boxes = []
-	for start in occ:
-		if start in seen:
+	if len(points) == 0:
+		return []
+	c = np.floor(np.asarray(points) / cell).astype(np.int64)
+	keys = _keys(c)
+	uniq, inverse = np.unique(keys, return_inverse=True)
+
+	#BFS по занятым клеткам (их немного — ограничено площадью страницы)
+	index_of = {int(k): i for i, k in enumerate(uniq)}
+	comp = np.full(len(uniq), -1, dtype=np.int64)
+	n_comp = 0
+	neighbor_offsets = [(dx << 21) + dy for dx in (-1, 0, 1) for dy in (-1, 0, 1)]
+	for start in range(len(uniq)):
+		if comp[start] != -1:
 			continue
-		seen.add(start)
-		stack = [start]
-		comp = []
+		comp[start] = n_comp
+		stack = [int(uniq[start])]
 		while stack:
-			c = stack.pop()
-			comp += occ[c]
-			for dx in (-1, 0, 1):
-				for dy in (-1, 0, 1):
-					nb = (c[0] + dx, c[1] + dy)
-					if nb in occ and nb not in seen:
-						seen.add(nb)
-						stack.append(nb)
-		if len(comp) >= min_pts:
-			xs = [p[0] for p in comp]
-			ys = [p[1] for p in comp]
-			boxes.append((min(xs) - pad, min(ys) - pad, max(xs) + pad, max(ys) + pad))
+			k = stack.pop()
+			for off in neighbor_offsets:
+				j = index_of.get(k + off)
+				if j is not None and comp[j] == -1:
+					comp[j] = n_comp
+					stack.append(int(uniq[j]))
+		n_comp += 1
+
+	comp_pts = comp[inverse]
+	counts = np.bincount(comp_pts, minlength=n_comp)
+
+	pts = np.asarray(points)
+	mins = np.full((n_comp, 2), np.inf)
+	maxs = np.full((n_comp, 2), -np.inf)
+	np.minimum.at(mins, comp_pts, pts)
+	np.maximum.at(maxs, comp_pts, pts)
+
+	boxes = []
+	for i in range(n_comp):
+		if counts[i] >= min_pts:
+			boxes.append((mins[i, 0] - pad, mins[i, 1] - pad,
+			              maxs[i, 0] + pad, maxs[i, 1] + pad))
 	return boxes
 
 
@@ -195,20 +287,18 @@ def compare_page_vectors(page1, page2, eps=1.5, step=2.0, register=True,
 	pts2 = extract_points(page2, step)
 
 	sx = sy = 0.0
-	if register and pts1 and pts2:
+	if register and len(pts1) and len(pts2):
 		sx, sy = estimate_shift(pts1, pts2)
-		pts1 = [(x + sx, y + sy) for x, y in pts1]
+		pts1 = pts1 + np.array([sx, sy])
 
-	grid1 = _grid(pts1, eps)
-	grid2 = _grid(pts2, eps)
-	un1 = _unmatched(pts1, grid2, eps)
-	un2 = _unmatched(pts2, grid1, eps)
+	un1 = pts1[~_match_mask(pts1, pts2, eps)]
+	un2 = pts2[~_match_mask(pts2, pts1, eps)]
 
 	total = len(pts1) + len(pts2)
 	share = (len(un1) + len(un2)) / total if total else 0.0
 
 	#координаты отличий страницы 1 возвращаем в её исходной системе
-	boxes1 = cluster_boxes([(x - sx, y - sy) for x, y in un1],
+	boxes1 = cluster_boxes(un1 - np.array([sx, sy]) if len(un1) else un1,
 	                       cell=cluster_cell, min_pts=cluster_min_pts)
 	boxes2 = cluster_boxes(un2, cell=cluster_cell, min_pts=cluster_min_pts)
 
