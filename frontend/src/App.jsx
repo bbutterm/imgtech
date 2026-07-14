@@ -1,6 +1,20 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import * as pdfjsLib from 'pdfjs-dist'
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
+import { onAuthStateChanged, signInWithEmailAndPassword, signOut } from 'firebase/auth'
+import { doc, onSnapshot, serverTimestamp, setDoc } from 'firebase/firestore'
+import { auth, db } from './firebase'
+
+const sidKey = (uid) => `imgtech-sid:${uid}`
+
+//записывает ID новой активной сессии — все остальные устройства этого
+//пользователя увидят изменение и разлогинятся
+function claimSession(uid) {
+  const sid = crypto.randomUUID()
+  localStorage.setItem(sidKey(uid), sid)
+  //если Firestore не включён — молча работаем без единственной сессии
+  setDoc(doc(db, 'sessions', uid), { sid, at: serverTimestamp() }).catch(() => {})
+}
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl
 
@@ -211,7 +225,60 @@ function PagePair({ page, docs, focus, activeId }) {
   )
 }
 
-export default function App() {
+function Login({ notice }) {
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  async function submit(e) {
+    e.preventDefault()
+    setBusy(true)
+    setError('')
+    try {
+      const cred = await signInWithEmailAndPassword(auth, email.trim(), password)
+      claimSession(cred.user.uid)
+    } catch (err) {
+      const code = err?.code || ''
+      if (code.includes('invalid-credential') || code.includes('wrong-password') ||
+          code.includes('user-not-found') || code.includes('invalid-email')) {
+        setError('Неверный email или пароль')
+      } else if (code.includes('too-many-requests')) {
+        setError('Слишком много попыток входа — подождите пару минут')
+      } else if (code.includes('network-request-failed')) {
+        setError('Нет связи с сервером авторизации — проверьте соединение')
+      } else {
+        setError('Не удалось войти, попробуйте ещё раз')
+      }
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <main className="login-wrap">
+      <form className="login-card" onSubmit={submit}>
+        <h2>Вход</h2>
+        <p className="login-hint">Доступ по приглашению. Введите выданные вам email и пароль.</p>
+        {notice && <div className="notice">{notice}</div>}
+        <label>
+          Email
+          <input type="email" autoComplete="username" required value={email}
+                 onChange={(e) => setEmail(e.target.value)} />
+        </label>
+        <label>
+          Пароль
+          <input type="password" autoComplete="current-password" required value={password}
+                 onChange={(e) => setPassword(e.target.value)} />
+        </label>
+        {error && <div className="error">{error}</div>}
+        <button type="submit" disabled={busy}>{busy ? 'Вхожу…' : 'Войти'}</button>
+      </form>
+    </main>
+  )
+}
+
+function Workspace() {
   const [file1, setFile1] = useState(null)
   const [file2, setFile2] = useState(null)
   const [docs, setDocs] = useState(null)
@@ -270,7 +337,13 @@ export default function App() {
       const fd = new FormData()
       fd.append('file1', file1)
       fd.append('file2', file2)
-      const resp = await fetch('/api/compare', { method: 'POST', body: fd })
+      const token = await auth.currentUser.getIdToken()
+      const resp = await fetch('/api/compare', {
+        method: 'POST',
+        body: fd,
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      if (resp.status === 401) throw new Error('Сессия истекла — обновите страницу и войдите заново.')
       if (resp.status === 413) throw new Error('Файлы превышают лимит загрузки (~4.5 МБ суммарно). Попробуйте отдельные страницы.')
       if (resp.status === 504) throw new Error('Сервер не успел обработать документы за отведённое время. Попробуйте сравнить меньше страниц за раз.')
       if (!resp.ok) {
@@ -298,18 +371,6 @@ export default function App() {
   }
 
   return (
-    <>
-      <header className="topbar">
-        <svg width="30" height="30" viewBox="0 0 16 16" aria-hidden="true">
-          <rect x="1.5" y="1.5" width="13" height="13" fill="none" stroke="#e53935" strokeWidth="2" />
-          <path d="M4.5 11 L8 5 L11.5 11" fill="none" stroke="currentColor" strokeWidth="1.4" />
-        </svg>
-        <div>
-          <div className="brand">Сравнение чертежей</div>
-          <div className="tagline">векторный анализ версий PDF-документов</div>
-        </div>
-      </header>
-
       <main>
         <form onSubmit={handleCompare} className="upload-form">
           <Dropzone label="Документ 1" file={file1} onFile={setFile1} />
@@ -366,6 +427,62 @@ export default function App() {
           </div>
         )}
       </main>
+  )
+}
+
+export default function App() {
+  const [user, setUser] = useState(undefined) //undefined — состояние ещё не известно
+  const [kicked, setKicked] = useState(false)
+
+  useEffect(() => onAuthStateChanged(auth, (u) => {
+    setUser(u)
+    if (u) setKicked(false)
+  }), [])
+
+  //единственная активная сессия: если в документе sessions/{uid} появился
+  //чужой ID сессии (вход с другого устройства) — разлогиниваемся.
+  //Вход на этом устройстве пишет свой ID до подписки, поэтому свой же
+  //логин нас не выбивает.
+  useEffect(() => {
+    if (!user) return
+    if (!localStorage.getItem(sidKey(user.uid))) claimSession(user.uid)
+    return onSnapshot(doc(db, 'sessions', user.uid), (snap) => {
+      const remote = snap.data()?.sid
+      if (remote && remote !== localStorage.getItem(sidKey(user.uid))) {
+        localStorage.removeItem(sidKey(user.uid))
+        setKicked(true)
+        signOut(auth)
+      }
+    }, () => { /* Firestore не включён — работаем без единственной сессии */ })
+  }, [user])
+
+  return (
+    <>
+      <header className="topbar">
+        <svg width="30" height="30" viewBox="0 0 16 16" aria-hidden="true">
+          <rect x="1.5" y="1.5" width="13" height="13" fill="none" stroke="#e53935" strokeWidth="2" />
+          <path d="M4.5 11 L8 5 L11.5 11" fill="none" stroke="currentColor" strokeWidth="1.4" />
+        </svg>
+        <div>
+          <div className="brand">Сравнение чертежей</div>
+          <div className="tagline">векторный анализ версий PDF-документов</div>
+        </div>
+        {user && (
+          <div className="topbar-user">
+            <span>{user.email}</span>
+            <button type="button" className="logout-btn" onClick={() => signOut(auth)}>
+              Выйти
+            </button>
+          </div>
+        )}
+      </header>
+      {user === undefined && (
+        <main className="login-wrap"><div className="spinner" /></main>
+      )}
+      {user === null && (
+        <Login notice={kicked ? 'Выполнен вход с другого устройства — эта сессия завершена.' : ''} />
+      )}
+      {user && <Workspace />}
     </>
   )
 }
