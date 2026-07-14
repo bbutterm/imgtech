@@ -8,15 +8,19 @@
 import time
 
 import fitz
-from fastapi import FastAPI, File, UploadFile
+from fastapi import FastAPI, File, Header, UploadFile
 from fastapi.responses import JSONResponse
 
 try:
 	from api.vector_compare import compare_page_vectors  #локальный запуск
+	from api.firebase_auth import verify_id_token
 except ImportError:
 	from vector_compare import compare_page_vectors  #рантайм Vercel
+	from firebase_auth import verify_id_token
 
 app = FastAPI()
+
+FIREBASE_PROJECT_ID = "imgtech-820d4"
 
 #выше этой доли несовпавших точек считаем, что векторные представления
 #несовместимы и геометрическим рамкам доверять нельзя
@@ -52,7 +56,16 @@ def _inside(text_box, graphics_boxes, min_overlap=0.5):
 
 
 @app.post("/api/compare")
-async def compare(file1: UploadFile = File(...), file2: UploadFile = File(...)):
+async def compare(file1: UploadFile = File(...), file2: UploadFile = File(...),
+                  authorization: str = Header(default="")):
+	if not authorization.startswith("Bearer "):
+		return JSONResponse({"error": "Требуется авторизация"}, status_code=401)
+	try:
+		verify_id_token(authorization[7:], FIREBASE_PROJECT_ID)
+	except Exception:
+		return JSONResponse({"error": "Сессия недействительна — войдите заново"},
+		                    status_code=401)
+
 	started = time.time()
 	data1 = await file1.read()
 	data2 = await file2.read()

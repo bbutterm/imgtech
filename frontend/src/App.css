@@ -26,6 +26,63 @@ body {
 .brand { font-size: 1.15rem; font-weight: 700; line-height: 1.2; }
 .tagline { font-size: 0.8rem; opacity: 0.65; }
 
+.topbar-user {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 0.85rem;
+  opacity: 0.85;
+}
+.logout-btn {
+  padding: 6px 14px;
+  font-size: 0.85rem;
+  background: rgba(128, 128, 128, 0.25);
+}
+
+/* --- вход --- */
+
+.login-wrap {
+  display: flex;
+  justify-content: center;
+  padding-top: 10vh;
+}
+.login-card {
+  width: min(360px, 92vw);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 26px 28px 30px;
+  border-radius: 14px;
+  background: rgba(128, 128, 128, 0.08);
+  box-shadow: 0 2px 14px rgba(0, 0, 0, 0.12);
+}
+.login-card h2 { margin: 0; }
+.login-hint { margin: 0; font-size: 0.85rem; opacity: 0.65; }
+.login-card label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+.login-card input {
+  padding: 9px 12px;
+  font-size: 1rem;
+  border: 1px solid rgba(128, 128, 128, 0.45);
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+}
+.login-card .error { margin-top: 0; }
+.notice {
+  padding: 10px 14px;
+  border-radius: 8px;
+  font-size: 0.85rem;
+  background: rgba(230, 145, 0, 0.14);
+  color: #b26a00;
+}
+
 main {
   max-width: 1320px;
   margin: 0 auto;
