@@ -39,6 +39,18 @@ def text_diff_boxes(page1, page2):
 	return boxes1, boxes2
 
 
+def _inside(text_box, graphics_boxes, min_overlap=0.5):
+	"""Текстовая рамка по большей части лежит внутри одной из графических?"""
+	tx0, ty0, tx1, ty1 = text_box
+	area = max((tx1 - tx0) * (ty1 - ty0), 1e-6)
+	for gx0, gy0, gx1, gy1 in graphics_boxes:
+		ix = max(0.0, min(tx1, gx1) - max(tx0, gx0))
+		iy = max(0.0, min(ty1, gy1) - max(ty0, gy0))
+		if ix * iy / area >= min_overlap:
+			return True
+	return False
+
+
 @app.post("/api/compare")
 async def compare(file1: UploadFile = File(...), file2: UploadFile = File(...)):
 	started = time.time()
@@ -56,6 +68,10 @@ async def compare(file1: UploadFile = File(...), file2: UploadFile = File(...)):
 		p1, p2 = doc1[i], doc2[i]
 		r = compare_page_vectors(p1, p2)
 		tb1, tb2 = text_diff_boxes(p1, p2)
+		#подписи, исчезнувшие вместе с графическим фрагментом, уже накрыты его
+		#рамкой — отдельными отличиями их не считаем
+		tb1 = [b for b in tb1 if not _inside(b, r["boxes1"])]
+		tb2 = [b for b in tb2 if not _inside(b, r["boxes2"])]
 		pages.append({
 			"index": i,
 			"boxes1": [list(b) for b in r["boxes1"]],
