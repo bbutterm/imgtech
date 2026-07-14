@@ -1,29 +1,14 @@
 #общие библиотеки
 import numpy as np
-import random
 
 #фреймворк для работы с тензорами и нейросетями
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-
-#torch.jit.enable_onednn_fusion(True)
 
 nc=1
 nef = 128
 ndf=128
 num_embeddings = 100
-
-class depthwise_separable_conv(nn.Module):
-    def __init__(self, nin, nout, kernel_size = 3, stride = 1, padding = 1, bias=False):
-        super(depthwise_separable_conv, self).__init__()
-        self.depthwise = nn.Conv2d(nin, nin, kernel_size=kernel_size, stride =stride, padding=padding, groups=nin, bias=bias)
-        self.pointwise = nn.Conv2d(nin, nout, kernel_size=1, bias=bias)
-
-    def forward(self, x):
-        out = self.depthwise(x)
-        out = self.pointwise(out)
-        return out
 
 class AE(nn.Module):
     def __init__(self):
@@ -46,7 +31,6 @@ class AE(nn.Module):
             nn.BatchNorm2d(nef * 4),
             # state size. (ndf*8) x 4 x 4
             nn.Conv2d(nef * 4, num_embeddings, 4, 1, 0, bias=False),
-            #nn.Sigmoid()
         )
 
         self.decoder = nn.Sequential(
@@ -68,7 +52,6 @@ class AE(nn.Module):
             nn.ReLU(True),
             # state size. (ngf) x 32 x 32
             nn.ConvTranspose2d( ndf, nc, 4, 2, 1, bias=False),
-            #nn.Tanh()
             )
 
     def forward(self, x):

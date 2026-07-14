@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Local databases
+*.db
+*.sqlite3
+
+# Generated comparison results
+img/app/static/outputs/
+
+# Environment / editor
+.env
+.DS_Store
+.idea/
+.vscode/

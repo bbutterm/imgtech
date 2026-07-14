@@ -1,4 +1,3 @@
-from typing import Dict, Any
 from urllib.parse import urlsplit
 
 from app import app, db
@@ -10,17 +9,14 @@ from flask_login import current_user, login_user, logout_user, login_required
 import sqlalchemy as sa
 from app.db_tables import User, Pdfs
 
-from flask import render_template, flash, redirect, url_for, request, send_from_directory, send_file, session, abort
+from flask import render_template, flash, redirect, url_for, request, send_from_directory, session
 from werkzeug.utils import secure_filename
 
-import sys
 import os
-import io
 import uuid
 import shutil
 import time
 import numpy as np
-import multiprocessing as mp
 from PIL import ImageFilter
 
 inputs_default = app.config['INPUTS_DEFAULT']
@@ -59,8 +55,6 @@ def home():
                 e = {'code': 400}
                 return render_template('errors.html', title='что-то пошло не так', error_message_400=error_message_400,
                                        e=e), 400
-            else:
-                pass
 
         if len(form.files.data) != 2:
             flash('Должно быть ровно два документа!')
@@ -101,10 +95,6 @@ def home():
                     page_numbers_list.append(inputs[:-2] + list(indices))
 
                 list(map(compare, page_numbers_list))
-                #with mp.Pool() as p:
-                #    p.map(compare, page_numbers_list)
-            else:
-                pass
 
             fname1 = str(uuid.uuid4()) + '.pdf'
             fname2 = str(uuid.uuid4()) + '.pdf'
@@ -181,7 +171,7 @@ def settings():
         form.select_iterations.data = inputs_default[2]
         form.select_filter.data = request.form['select_filter']
         form.select_blend.data = inputs_default[4]
-        form.select_thresh.data = inputs_default[5]
+        form.select_dpi.data = inputs_default[5]
 
     return render_template('settings.html', title='Параметры', form=form, data=inputs_default)
 

@@ -1,23 +1,12 @@
 import numpy as np
-import time
-import base64
-import io
 import fitz
 
-import PIL
-from PIL import Image, ImageChops, ImageOps, ImageDraw, ImageFilter, ImageFont, ImageEnhance
+from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont, ImageEnhance
 
 Image.MAX_IMAGE_PIXELS = 1000000000
 
-import tempfile
-import shutil
 import os
-from pathlib import Path
-import base64
 import glob
-import io
-import itertools
-from itertools import product
 import torch
 import cv2
 
@@ -63,27 +52,6 @@ def jpg_to_pdf(filepath, doc):
     page.show_pdf_page(rect, imgPDF, 0)
 
     return doc
-
-
-# функция расчета коэффициента перекрытия боксов
-def iou(bboxes_tuple):
-    # determine the (x, y)-coordinates of the intersection rectangle
-    boxA = bboxes_tuple[0]
-    boxB = bboxes_tuple[1]
-    xA = max(boxA[0], boxB[0])
-    yA = max(boxA[1], boxB[1])
-    xB = min(boxA[0] + boxA[2], boxB[0] + boxB[2])
-    yB = min(boxA[1] + boxA[3], boxB[1] + boxB[3])
-    # compute the area of intersection rectangle
-    interArea = max(0, xB - xA) * max(0, yB - yA)
-    # compute the area of both rectangles
-    boxAArea = boxA[2] * boxA[3]
-    boxBArea = boxB[2] * boxB[3]
-    # compute the intersection over union by taking the intersection
-    # area and dividing it by the sum of bboxes area
-    iou = interArea / min(boxAArea, boxBArea)
-    # return the intersection over union value
-    return iou
 
 
 # функция поиска областей картинки с разным содержанием
@@ -193,20 +161,6 @@ def get_pictures_blend(im1_1, im1_2, im2_1, im2_2, bboxes1, bboxes2, page_size1,
                                              distance_thresh=distance_thresh,
                                              im_filter1=im_filter1, im_filter2=im_filter2)
 
-        # bboxes_tups1 = list(product(bboxes_images, bboxes_extended1))
-        # bboxes_tups2 = list(product(bboxes_images, bboxes_extended2))
-
-        # ious1 = list(map(iou, bboxes_tups1))
-        # ious2 = list(map(iou, bboxes_tups2))
-
-        # ious_filtered1 = [idx % len(bboxes_extended1) for idx, iou in enumerate(ious1) if iou > 0]
-        # ious_filtered2 = [idx % len(bboxes_extended2) for idx, iou in enumerate(ious2) if iou > 0]
-
-        # bboxes_extended1_filtered = [box for idx, box in enumerate(bboxes_extended1) if idx not in ious_filtered1]
-        # bboxes_extended2_filtered = [box for idx, box in enumerate(bboxes_extended2) if idx not in ious_filtered2]
-
-        # coords1 = bboxes_images + bboxes_extended1_filtered
-        # coords2 = bboxes_images + bboxes_extended2_filtered
         coords1 = bboxes_images + bboxes_extended1
         coords2 = bboxes_images + bboxes_extended2
 
@@ -237,9 +191,6 @@ def get_pictures_blend(im1_1, im1_2, im2_1, im2_2, bboxes1, bboxes2, page_size1,
         result1.save(path1, optimize=True, quality=15)
         result2.save(path2, optimize=True, quality=15)
 
-    else:
-        pass
-
 
 def compare(inputs_list):
     path1 = f'{inputs_list[0]}/pdf1_{inputs_list[10]}.pdf'
@@ -266,12 +217,8 @@ def compare(inputs_list):
 
     if rot1 != 0:
        doc1_1[0].set_rotation(0)
-    else:
-       pass
     if rot2 != 0:
        doc1_2[0].set_rotation(0)
-    else:
-       pass
     if draws >= 500:
         for box in w1['wcoords']:
             doc2_1[0].add_redact_annot(box, '', cross_out=False)

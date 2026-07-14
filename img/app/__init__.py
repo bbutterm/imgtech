@@ -7,7 +7,6 @@ from flask_login import LoginManager
 from flask_bootstrap import Bootstrap5
 
 app = Flask(__name__)
-app.debug = True
 app.config.from_object(Config)
 
 login = LoginManager(app)
@@ -17,7 +16,6 @@ login.login_message = u"Пожалуйста, авторизуйтесь!"
 db = SQLAlchemy(app)
 migrate = Migrate(app, db)
 
-assert isinstance(app, object)
 bootstrap = Bootstrap5(app)
 
-from app import routes, models
+from app import routes

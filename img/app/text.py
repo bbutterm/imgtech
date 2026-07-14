@@ -1,9 +1,6 @@
 import fitz
 import difflib as dl
 
-import numpy as np
-import re
-
 #функция определения размера страницы
 def page_size(path1):
 	pdf = fitz.open(path1)

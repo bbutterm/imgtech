@@ -1,11 +1,9 @@
 import fitz
 import difflib as dl
-import os
 import numpy as np
 import multiprocessing as mp
 from skimage.metrics import structural_similarity
 
-import PIL
 from PIL import Image
 
 from app.text import drawings_number
@@ -69,43 +67,6 @@ def pages_distance(pdf_file_path):
 		dist = 0.0
 
 	return dist
-	
-
-	#elif draws >= 500:
-		#rot1 = doc1[0].rotation
-		#rot2 = doc2[0].rotation
-
-		#if rot1 != 0:
-			#doc1[0].set_rotation(0)
-		#else:
-			#pass
-		#if rot2 != 0:
-			#doc2[0].set_rotation(0)
-		#else:
-			#pass
-    
-
-		#pix1 = doc1[0].get_pixmap()
-		#im1 = Image.frombytes('L', [pix1.width, pix1.height], pix1.samples)
-		#im1_np = np.asarray(im1)
-
-		#pix2 = doc2[0].get_pixmap()
-		#im2 = Image.frombytes('L', [pix2.width, pix2.height], pix2.samples)
-		#im2_np = np.asarray(im2)
-
-		#if im1_np.shape != im2_np.shape:
-			#dist = 0.0
-		#else:
-			#score, _ = structural_similarity(im1_np, im2_np, full=True)
-			#if score > 0.7:
-				#dist = score
-			#else:
-				#dist = 0
-	#если в одной картинке есть текст, а вдругой нет, то расстояние 0, то есть они полностью разные
-	#else:
-		#dist = 0.0
-	
-	#return dist
 
 #функция поиска лишних страниц в сравниваемых документах и их удаление из списков путей к страницам
 def pages_align(page_nums1, page_nums2, paths1, paths2):
@@ -127,7 +88,6 @@ def pages_align(page_nums1, page_nums2, paths1, paths2):
 			pages_pairs.append((page1, page2))
 	
 	#создаем список расстояний между парами страниц
-	#pages_dists = [dist for dist in map(pages_distance, paths_pairs)]
 	with mp.Pool() as p:
 		pages_dists = p.map(pages_distance, paths_pairs)
 
@@ -135,7 +95,6 @@ def pages_align(page_nums1, page_nums2, paths1, paths2):
 	#удаляем не прошедшие фильтр пары из первоаначального списка
 	#в финальный список наоборот добавляем прошедшие фильтр пары
 	for dist in sorted(zip(pages_dists, pages_pairs), reverse=True):
-	#for dist in sorted(dists_pages_pairs_filtered, reverse=True):
 		if dist[1][0] in page_numbers1_initial and dist[1][1] in page_numbers2_initial and dist[0] > 0.1:
 			page_numbers1_final.append(dist[1][0])
 			page_numbers2_final.append(dist[1][1])

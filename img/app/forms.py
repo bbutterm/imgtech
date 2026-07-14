@@ -1,17 +1,14 @@
 from flask_wtf import FlaskForm
 from wtforms import StringField, PasswordField, BooleanField, SubmitField, SelectField, MultipleFileField, \
-    TextAreaField, DecimalField, IntegerField
+    DecimalField, IntegerField
 from wtforms.validators import ValidationError, DataRequired, Email, EqualTo
-from flask_wtf.file import FileRequired, FileAllowed
-
-from PIL import ImageFilter
+from flask_wtf.file import FileAllowed
 
 import sqlalchemy as sa
 from app import db
 from app.db_tables import User
 
 class UploadForm(FlaskForm):
-    #files = MultipleFileField('file', validators=[FileAllowed(['pdf'])])
     files = MultipleFileField('file', validators=[FileAllowed(['pdf'])])
     submit = SubmitField('Сравнить документы')
 
