@@ -12,6 +12,11 @@ venv/
 # Generated comparison results
 img/app/static/outputs/
 
+# Frontend / deploy
+node_modules/
+frontend/dist/
+.vercel/
+
 # Environment / editor
 .env
 .DS_Store

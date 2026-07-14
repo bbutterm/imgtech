@@ -1,0 +1,4 @@
+# зависимости serverless-функции api/ (Vercel ставит их из корня репозитория)
+fastapi == 0.115.0
+python-multipart == 0.0.9
+PyMuPDF == 1.24.2
