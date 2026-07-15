@@ -9,9 +9,6 @@ venv/
 *.db
 *.sqlite3
 
-# Generated comparison results
-img/app/static/outputs/
-
 # Frontend / deploy
 node_modules/
 frontend/dist/

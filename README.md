@@ -46,7 +46,10 @@ Vercel serverless (Python, FastAPI)  ── проверка токена ──
 | `requirements.txt` | Зависимости serverless-функции (Vercel ставит из корня) |
 | `vercel.json` | Сборка фронта, python-функция, rewrites `/api/*`, регион `pdx1` |
 | `.python-version` | Пин Python 3.12 для сборки Vercel (иначе билдер берёт свежий Python без готовых wheel'ов и компилирует numpy из исходников) |
-| `img/`, `cleaner/`, `nginx/` | **LEGACY** — прежнее Flask-приложение (растровый пайплайн + PyTorch-автоэнкодер, docker-compose). Новым кодом не используется. |
+
+Прежнее Flask-приложение (каталоги `img/`, `cleaner/`, `nginx/`: растровый
+пайплайн с PyTorch-автоэнкодером, docker-compose) удалено из рабочего
+дерева — при необходимости смотреть историю git до коммита с этим README.
 
 ## Как работает ядро (core/vector_compare.py)
 
@@ -85,7 +88,6 @@ Vercel serverless (Python, FastAPI)  ── проверка токена ──
 | `POST /api/plan-urls` | JSON `{url1,url2}` — подписанные ссылки Storage | план |
 | `POST /api/compare-batch` | multipart + поле `pairs` (JSON-строка, ≤12 пар) | `{pages:[…], elapsed}` |
 | `POST /api/compare-batch-urls` | JSON `{url1,url2,pairs}` | то же |
-| `POST /api/compare`, `/api/compare-urls` | как выше, без pairs | страницы 1:1 — legacy/ручная проверка, фронт не использует |
 
 **План** — сопоставление страниц по содержимому (difflib по спискам слов,
 окно ±10 от диагонали, жадное связывание, порог 0.5):
@@ -219,5 +221,3 @@ python3 -m core.tests.run_tests            # тесты ядра (13 прове�
 - Страницы без слов сопоставляются по диагонали (пустые списки слов дают
   похожесть 1.0) — для чисто графических комплектов нужна векторная
   подпись страницы в `build_plan`.
-- Legacy-каталоги `img/`, `cleaner/`, `nginx/` подлежат удалению после
-  полного перехода (внимание: `img/config.py` содержит реальные email-адреса).

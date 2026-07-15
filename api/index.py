@@ -9,9 +9,6 @@
 2. /api/compare-batch (или /api/compare-batch-urls) — сравнивает указанную
    партию пар страниц; клиент вызывает партиями и показывает прогресс.
 
-Одиночные вызовы /api/compare и /api/compare-urls сравнивают страницы 1:1
-и остаются для простых случаев и ручной проверки.
-
 Локальный запуск из корня репозитория:
     pip install -r requirements.txt uvicorn
     uvicorn api.index:app --port 8000
@@ -351,45 +348,3 @@ async def compare_batch_urls(payload: BatchUrlsIn,
 	started = time.time()
 	pages = compare_pairs(doc1, doc2, pair_list)
 	return {"pages": pages, "elapsed": round(time.time() - started, 2)}
-
-
-def _compare_documents(data1, data2):
-	"""Одиночный вызов: страницы 1:1, для простых случаев и ручной проверки."""
-	started = time.time()
-	doc1, doc2 = _open_pdfs(data1, data2)
-	if doc1 is None:
-		return JSONResponse({"error": "Не удалось открыть один из файлов как PDF"},
-		                    status_code=400)
-	pair_list = [(i, i) for i in range(min(doc1.page_count, doc2.page_count))]
-	pages = compare_pairs(doc1, doc2, pair_list)
-	return {
-		"pages": pages,
-		"numPages1": doc1.page_count,
-		"numPages2": doc2.page_count,
-		"elapsed": round(time.time() - started, 2),
-	}
-
-
-@app.post("/api/compare")
-async def compare(file1: UploadFile = File(...), file2: UploadFile = File(...),
-                  authorization: str = Header(default="")):
-	denied = _check_auth(authorization)
-	if denied:
-		return denied
-	return _compare_documents(await file1.read(), await file2.read())
-
-
-@app.post("/api/compare-urls")
-async def compare_urls(payload: UrlsIn, authorization: str = Header(default="")):
-	denied = _check_auth(authorization)
-	if denied:
-		return denied
-	try:
-		data1 = _fetch_from_storage(payload.url1)
-		data2 = _fetch_from_storage(payload.url2)
-	except ValueError as e:
-		return JSONResponse({"error": str(e)}, status_code=400)
-	except Exception:
-		return JSONResponse({"error": "Не удалось получить файлы из хранилища"},
-		                    status_code=502)
-	return _compare_documents(data1, data2)
