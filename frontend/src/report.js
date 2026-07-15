@@ -1,46 +1,61 @@
 //формирование DOCX-отчёта согласования отличий
 //вынесено из компонента, чтобы генерацию можно было проверять отдельно
 
-export async function buildReportDoc(meta, items) {
-  const { Document, Paragraph, TextRun, Table, TableRow, TableCell, WidthType } =
-    await import('docx')
+//ширины колонок в твипах; сумма ~9638 = полоса набора A4 с полями 2 см
+const COLS = [700, 1700, 1800, 1800, 3638]
 
-  const cell = (text, opts = {}) => new TableCell({
-    width: opts.width ? { size: opts.width, type: WidthType.PERCENTAGE } : undefined,
+export async function buildReportDoc(meta, items) {
+  const { Document, Paragraph, TextRun, Table, TableRow, TableCell,
+          WidthType, TableLayoutType, ShadingType } = await import('docx')
+
+  const cell = (text, col, opts = {}) => new TableCell({
+    width: { size: COLS[col], type: WidthType.DXA },
+    shading: opts.shade ? { type: ShadingType.CLEAR, fill: 'E8E8E8' } : undefined,
+    margins: { top: 80, bottom: 80, left: 110, right: 110 },
     children: [new Paragraph({
-      children: [new TextRun({ text: String(text ?? ''), bold: !!opts.bold })],
+      children: [new TextRun({ text: String(text ?? ''), bold: !!opts.bold, size: 20 })],
     })],
   })
 
-  const header = new TableRow({
+  const headerRow = new TableRow({
     tableHeader: true,
-    children: [
-      cell('№', { bold: true, width: 6 }),
-      cell('Страница', { bold: true, width: 16 }),
-      cell('Тип', { bold: true, width: 16 }),
-      cell('Статус', { bold: true, width: 18 }),
-      cell('Комментарий', { bold: true, width: 44 }),
-    ],
+    children: ['№', 'Страница', 'Тип', 'Статус', 'Комментарий']
+      .map((t, c) => cell(t, c, { bold: true, shade: true })),
   })
   const rows = items.map((it, idx) => new TableRow({
-    children: [cell(idx + 1), cell(it.page), cell(it.type), cell(it.status), cell(it.comment)],
+    children: [
+      cell(idx + 1, 0),
+      cell(it.page, 1),
+      cell(it.type, 2),
+      cell(it.status, 3),
+      cell(it.comment, 4),
+    ],
   }))
 
   const line = (text, opts = {}) => new Paragraph({
-    children: [new TextRun({ text, bold: !!opts.bold, size: opts.size })],
+    spacing: { after: 120 },
+    children: [new TextRun({ text, bold: !!opts.bold, size: opts.size || 22 })],
   })
 
   return new Document({
+    styles: {
+      default: {
+        document: { run: { font: 'Calibri', size: 22 } },
+      },
+    },
     sections: [{
       children: [
         line('Отчёт о согласовании изменений', { bold: true, size: 32 }),
-        line(''),
         line(`Документ 1: ${meta.file1}`),
         line(`Документ 2: ${meta.file2}`),
         line(`Дата: ${meta.date}`),
         line(`Отличий: ${meta.total} · Согласовано: ${meta.approved} · С замечаниями: ${meta.commented}`),
-        line(''),
-        new Table({ width: { size: 100, type: WidthType.PERCENTAGE }, rows: [header, ...rows] }),
+        new Table({
+          layout: TableLayoutType.FIXED,
+          width: { size: COLS.reduce((a, b) => a + b, 0), type: WidthType.DXA },
+          columnWidths: COLS,
+          rows: [headerRow, ...rows],
+        }),
       ],
     }],
   })
