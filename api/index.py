@@ -6,21 +6,24 @@
 """
 
 import time
+import urllib.request
 
 import fitz
 from fastapi import FastAPI, File, Header, UploadFile
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 try:
 	from api.vector_compare import compare_page_vectors  #локальный запуск
-	from api.firebase_auth import verify_id_token
+	from api.supabase_auth import verify_token, SUPABASE_URL
 except ImportError:
 	from vector_compare import compare_page_vectors  #рантайм Vercel
-	from firebase_auth import verify_id_token
+	from supabase_auth import verify_token, SUPABASE_URL
 
 app = FastAPI()
 
-FIREBASE_PROJECT_ID = "imgtech-820d4"
+#лимит на скачивание одного файла из хранилища
+MAX_DOWNLOAD = 60 * 1024 * 1024
 
 #выше этой доли несовпавших точек считаем, что векторные представления
 #несовместимы и геометрическим рамкам доверять нельзя
@@ -55,20 +58,38 @@ def _inside(text_box, graphics_boxes, min_overlap=0.5):
 	return False
 
 
-@app.post("/api/compare")
-async def compare(file1: UploadFile = File(...), file2: UploadFile = File(...),
-                  authorization: str = Header(default="")):
+def _check_auth(authorization):
+	"""Возвращает JSONResponse с 401 либо None, если токен валиден."""
 	if not authorization.startswith("Bearer "):
 		return JSONResponse({"error": "Требуется авторизация"}, status_code=401)
 	try:
-		verify_id_token(authorization[7:], FIREBASE_PROJECT_ID)
+		verify_token(authorization[7:])
 	except Exception:
 		return JSONResponse({"error": "Сессия недействительна — войдите заново"},
 		                    status_code=401)
+	return None
 
+
+def _fetch_from_storage(url):
+	"""Скачивает файл по подписанной ссылке нашего Supabase Storage."""
+	#жёсткая проверка происхождения ссылки — API не должен скачивать
+	#произвольные адреса, которые ему подсунули
+	if not url.startswith(f"{SUPABASE_URL}/storage/v1/object/sign/uploads/"):
+		raise ValueError("недопустимый источник файла")
+	with urllib.request.urlopen(url, timeout=60) as resp:
+		data = resp.read(MAX_DOWNLOAD + 1)
+	if len(data) > MAX_DOWNLOAD:
+		raise ValueError("файл слишком большой")
+	return data
+
+
+class CompareUrlsIn(BaseModel):
+	url1: str
+	url2: str
+
+
+def _compare_documents(data1, data2):
 	started = time.time()
-	data1 = await file1.read()
-	data2 = await file2.read()
 	try:
 		doc1 = fitz.open(stream=data1, filetype="pdf")
 		doc2 = fitz.open(stream=data2, filetype="pdf")
@@ -103,3 +124,31 @@ async def compare(file1: UploadFile = File(...), file2: UploadFile = File(...),
 		"numPages2": doc2.page_count,
 		"elapsed": round(time.time() - started, 2),
 	}
+
+
+@app.post("/api/compare")
+async def compare(file1: UploadFile = File(...), file2: UploadFile = File(...),
+                  authorization: str = Header(default="")):
+	"""Прямая загрузка мелких файлов (в лимит тела запроса Vercel)."""
+	denied = _check_auth(authorization)
+	if denied:
+		return denied
+	return _compare_documents(await file1.read(), await file2.read())
+
+
+@app.post("/api/compare-urls")
+async def compare_urls(payload: CompareUrlsIn,
+                       authorization: str = Header(default="")):
+	"""Крупные файлы: клиент кладёт их в Supabase Storage и передаёт ссылки."""
+	denied = _check_auth(authorization)
+	if denied:
+		return denied
+	try:
+		data1 = _fetch_from_storage(payload.url1)
+		data2 = _fetch_from_storage(payload.url2)
+	except ValueError as e:
+		return JSONResponse({"error": str(e)}, status_code=400)
+	except Exception:
+		return JSONResponse({"error": "Не удалось получить файлы из хранилища"},
+		                    status_code=502)
+	return _compare_documents(data1, data2)

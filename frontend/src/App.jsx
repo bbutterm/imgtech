@@ -1,9 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import * as pdfjsLib from 'pdfjs-dist'
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
-import { onAuthStateChanged, signInWithEmailAndPassword, signOut } from 'firebase/auth'
-import { doc, onSnapshot, serverTimestamp, setDoc } from 'firebase/firestore'
-import { auth, db } from './firebase'
+import { supabase } from './supabase'
 
 const sidKey = (uid) => `imgtech-sid:${uid}`
 
@@ -12,15 +10,15 @@ const sidKey = (uid) => `imgtech-sid:${uid}`
 function claimSession(uid) {
   const sid = crypto.randomUUID()
   localStorage.setItem(sidKey(uid), sid)
-  //если Firestore не включён — молча работаем без единственной сессии
-  setDoc(doc(db, 'sessions', uid), { sid, at: serverTimestamp() }).catch(() => {})
+  supabase.from('sessions').upsert({ uid, sid }).then(() => {}, () => {})
 }
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl
 
 const VIEW_W = 620          // ширина вьюпорта страницы, px
 const RENDER_W = 2800       // разрешение рендера страницы, px (запас под зум)
-const MAX_UPLOAD_MB = 4.4   // лимит тела запроса Vercel ~4.5 МБ
+const DIRECT_LIMIT_MB = 3.5 // мельче — напрямую в API, крупнее — через хранилище
+const MAX_FILE_MB = 50      // лимит Supabase Storage на один файл
 
 const mb = (bytes) => (bytes / 1024 / 1024).toFixed(2)
 
@@ -236,16 +234,21 @@ function Login({ notice }) {
     setBusy(true)
     setError('')
     try {
-      const cred = await signInWithEmailAndPassword(auth, email.trim(), password)
-      claimSession(cred.user.uid)
+      const { data, error: err } = await supabase.auth.signInWithPassword({
+        email: email.trim(),
+        password,
+      })
+      if (err) throw err
+      claimSession(data.user.id)
     } catch (err) {
-      const code = err?.code || ''
-      if (code.includes('invalid-credential') || code.includes('wrong-password') ||
-          code.includes('user-not-found') || code.includes('invalid-email')) {
+      const msg = String(err?.message || '')
+      if (msg.includes('Invalid login credentials')) {
         setError('Неверный email или пароль')
-      } else if (code.includes('too-many-requests')) {
+      } else if (msg.includes('Email not confirmed')) {
+        setError('Аккаунт не подтверждён — обратитесь к администратору')
+      } else if (msg.toLowerCase().includes('rate limit') || err?.status === 429) {
         setError('Слишком много попыток входа — подождите пару минут')
-      } else if (code.includes('network-request-failed')) {
+      } else if (msg.includes('fetch') || msg.includes('network')) {
         setError('Нет связи с сервером авторизации — проверьте соединение')
       } else {
         setError('Не удалось войти, попробуйте ещё раз')
@@ -278,7 +281,7 @@ function Login({ notice }) {
   )
 }
 
-function Workspace() {
+function Workspace({ user }) {
   const [file1, setFile1] = useState(null)
   const [file2, setFile2] = useState(null)
   const [docs, setDocs] = useState(null)
@@ -296,7 +299,7 @@ function Workspace() {
     return () => clearInterval(timer)
   }, [busy])
 
-  const tooBig = (file1?.size || 0) + (file2?.size || 0) > MAX_UPLOAD_MB * 1024 * 1024
+  const tooBig = Math.max(file1?.size || 0, file2?.size || 0) > MAX_FILE_MB * 1024 * 1024
 
   const diffs = useMemo(() => {
     if (!result) return []
@@ -334,17 +337,54 @@ function Workspace() {
     setFocus(null)
     setCur(0)
     try {
-      const fd = new FormData()
-      fd.append('file1', file1)
-      fd.append('file2', file2)
-      const token = await auth.currentUser.getIdToken()
-      const resp = await fetch('/api/compare', {
-        method: 'POST',
-        body: fd,
-        headers: { Authorization: `Bearer ${token}` },
-      })
+      const { data: sessionData } = await supabase.auth.getSession()
+      const token = sessionData.session?.access_token
+      if (!token) throw new Error('Сессия истекла — обновите страницу и войдите заново.')
+
+      let resp
+      if (file1.size + file2.size < DIRECT_LIMIT_MB * 1024 * 1024) {
+        //мелкие файлы — напрямую в API, без хранилища
+        const fd = new FormData()
+        fd.append('file1', file1)
+        fd.append('file2', file2)
+        resp = await fetch('/api/compare', {
+          method: 'POST',
+          body: fd,
+          headers: { Authorization: `Bearer ${token}` },
+        })
+      } else {
+        //крупные — через Supabase Storage, API получает только ссылки
+        const jobId = crypto.randomUUID()
+        const path1 = `${user.id}/${jobId}/1.pdf`
+        const path2 = `${user.id}/${jobId}/2.pdf`
+        try {
+          const opts = { contentType: 'application/pdf' }
+          const [up1, up2] = await Promise.all([
+            supabase.storage.from('uploads').upload(path1, file1, opts),
+            supabase.storage.from('uploads').upload(path2, file2, opts),
+          ])
+          if (up1.error || up2.error) {
+            throw new Error(`Не удалось загрузить файлы: ${(up1.error || up2.error).message}`)
+          }
+          const [s1, s2] = await Promise.all([
+            supabase.storage.from('uploads').createSignedUrl(path1, 3600),
+            supabase.storage.from('uploads').createSignedUrl(path2, 3600),
+          ])
+          if (s1.error || s2.error) {
+            throw new Error('Не удалось подготовить файлы к сравнению')
+          }
+          resp = await fetch('/api/compare-urls', {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url1: s1.data.signedUrl, url2: s2.data.signedUrl }),
+          })
+        } finally {
+          supabase.storage.from('uploads').remove([path1, path2]).then(() => {}, () => {})
+        }
+      }
+
       if (resp.status === 401) throw new Error('Сессия истекла — обновите страницу и войдите заново.')
-      if (resp.status === 413) throw new Error('Файлы превышают лимит загрузки (~4.5 МБ суммарно). Попробуйте отдельные страницы.')
+      if (resp.status === 413) throw new Error('Файлы слишком большие для прямой отправки — попробуйте ещё раз.')
       if (resp.status === 504) throw new Error('Сервер не успел обработать документы за отведённое время. Попробуйте сравнить меньше страниц за раз.')
       if (!resp.ok) {
         let msg = `Ошибка сервера (${resp.status})`
@@ -381,8 +421,7 @@ function Workspace() {
             </button>
             {tooBig && (
               <div className="size-warn">
-                Суммарный размер больше {MAX_UPLOAD_MB} МБ — загрузка не пройдёт.
-                Разбейте документы на страницы.
+                Файл больше {MAX_FILE_MB} МБ — такой размер пока не поддерживается.
               </div>
             )}
           </div>
@@ -434,26 +473,36 @@ export default function App() {
   const [user, setUser] = useState(undefined) //undefined — состояние ещё не известно
   const [kicked, setKicked] = useState(false)
 
-  useEffect(() => onAuthStateChanged(auth, (u) => {
-    setUser(u)
-    if (u) setKicked(false)
-  }), [])
+  useEffect(() => {
+    const { data: sub } = supabase.auth.onAuthStateChange((_event, session) => {
+      const u = session?.user ?? null
+      setUser(u)
+      if (u) setKicked(false)
+    })
+    return () => sub.subscription.unsubscribe()
+  }, [])
 
-  //единственная активная сессия: если в документе sessions/{uid} появился
+  //единственная активная сессия: если в строке sessions с нашим uid появился
   //чужой ID сессии (вход с другого устройства) — разлогиниваемся.
   //Вход на этом устройстве пишет свой ID до подписки, поэтому свой же
   //логин нас не выбивает.
   useEffect(() => {
     if (!user) return
-    if (!localStorage.getItem(sidKey(user.uid))) claimSession(user.uid)
-    return onSnapshot(doc(db, 'sessions', user.uid), (snap) => {
-      const remote = snap.data()?.sid
-      if (remote && remote !== localStorage.getItem(sidKey(user.uid))) {
-        localStorage.removeItem(sidKey(user.uid))
-        setKicked(true)
-        signOut(auth)
-      }
-    }, () => { /* Firestore не включён — работаем без единственной сессии */ })
+    if (!localStorage.getItem(sidKey(user.id))) claimSession(user.id)
+    const channel = supabase
+      .channel(`session-watch-${user.id}`)
+      .on('postgres_changes',
+          { event: '*', schema: 'public', table: 'sessions', filter: `uid=eq.${user.id}` },
+          (payload) => {
+            const remote = payload.new?.sid
+            if (remote && remote !== localStorage.getItem(sidKey(user.id))) {
+              localStorage.removeItem(sidKey(user.id))
+              setKicked(true)
+              supabase.auth.signOut()
+            }
+          })
+      .subscribe()
+    return () => { supabase.removeChannel(channel) }
   }, [user])
 
   return (
@@ -470,7 +519,7 @@ export default function App() {
         {user && (
           <div className="topbar-user">
             <span>{user.email}</span>
-            <button type="button" className="logout-btn" onClick={() => signOut(auth)}>
+            <button type="button" className="logout-btn" onClick={() => supabase.auth.signOut()}>
               Выйти
             </button>
           </div>
@@ -482,7 +531,7 @@ export default function App() {
       {user === null && (
         <Login notice={kicked ? 'Выполнен вход с другого устройства — эта сессия завершена.' : ''} />
       )}
-      {user && <Workspace />}
+      {user && <Workspace user={user} />}
     </>
   )
 }

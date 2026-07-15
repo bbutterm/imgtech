@@ -5,7 +5,3 @@ fastapi >= 0.115.0, < 1
 python-multipart >= 0.0.9, < 0.1
 PyMuPDF >= 1.24.2, < 1.27
 numpy >= 1.26.2, < 3
-
-# проверка Firebase ID-токенов
-PyJWT >= 2.7, < 3
-cryptography >= 42, < 47
