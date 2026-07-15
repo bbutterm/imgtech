@@ -6,10 +6,10 @@ import { downloadReport } from './report.js'
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl
 
-//ширина вьюпорта страницы: на узких экранах ужимается, чтобы разворот
-//и панель согласования не уезжали за край
-const VIEW_W = Math.min(620, Math.max(320,
-  (typeof window !== 'undefined' ? window.innerWidth : 660) - 40))
+//ширина вьюпорта страницы: на узких экранах ужимается, чтобы разворот,
+//панель согласования и отметка «согласовано» не уезжали за край
+const VIEW_W = Math.min(620, Math.max(300,
+  (typeof window !== 'undefined' ? window.innerWidth : 680) - 60))
 const DIRECT_LIMIT_MB = 3.5 // мельче — напрямую в API, крупнее — через хранилище
 const MAX_FILE_MB = 50      // лимит Supabase Storage на один файл
 const BATCH_SIZE = 6        // пар страниц на один запрос к API
@@ -121,7 +121,7 @@ function LazyMount({ height, force, children }) {
 
 function PageView({ pdfDoc, pageNumber, boxes, textBoxes, pageW, pageH,
                     view, setView, label, activeId, side, pairKey, renderW,
-                    approvedIds }) {
+                    approved }) {
   const canvasRef = useRef(null)
   const vpRef = useRef(null)
   const dragRef = useRef(null)
@@ -203,12 +203,12 @@ function PageView({ pdfDoc, pageNumber, boxes, textBoxes, pageW, pageH,
           <canvas ref={canvasRef} />
           {boxes.map((b, i) => {
             const id = `${side}-graphics-${pairKey}-${i}`
-            const cls = `box box-graphics${id === activeId ? ' active' : ''}${approvedIds?.has(id) ? ' approved' : ''}`
+            const cls = `box box-graphics${id === activeId ? ' active' : ''}${approved ? ' approved' : ''}`
             return <div key={id} className={cls} style={boxStyle(b)} />
           })}
           {textBoxes.map((b, i) => {
             const id = `${side}-text-${pairKey}-${i}`
-            const cls = `box box-text${id === activeId ? ' active' : ''}${approvedIds?.has(id) ? ' approved' : ''}`
+            const cls = `box box-text${id === activeId ? ' active' : ''}${approved ? ' approved' : ''}`
             return <div key={id} className={cls} style={boxStyle(b)} />
           })}
         </div>
@@ -223,11 +223,12 @@ function PageView({ pdfDoc, pageNumber, boxes, textBoxes, pageW, pageH,
   )
 }
 
-function PagePair({ page, docs, focus, activeId, renderW, approvedIds }) {
+function PagePair({ page, docs, focus, activeId, renderW, reviews, setReview }) {
   const [view, setView] = useState({ z: 1, tx: 0, ty: 0 })
   const secRef = useRef(null)
   const pairKey = pairKeyOf(page)
   const focused = focus?.pairKey === pairKey
+  const approved = !!reviews[pairKey]?.approved
 
   useEffect(() => {
     if (!focused || !focus.box) return
@@ -255,7 +256,7 @@ function PagePair({ page, docs, focus, activeId, renderW, approvedIds }) {
   const estHeight = VIEW_W * (page.height1 / page.width1) + 40
 
   return (
-    <section className="page-pair" ref={secRef}>
+    <section className={`page-pair${approved ? ' approved-page' : ''}`} ref={secRef}>
       <h3>
         {title}
         {total === 0 && !page.heavilyChanged &&
@@ -271,6 +272,9 @@ function PagePair({ page, docs, focus, activeId, renderW, approvedIds }) {
             изменений очень много — показаны крупнейшие
           </span>
         )}
+        {showPair && (
+          <ReviewControls id={pairKey} reviews={reviews} setReview={setReview} />
+        )}
       </h3>
       {showPair && (
         <LazyMount height={estHeight} force={focused}>
@@ -279,14 +283,14 @@ function PagePair({ page, docs, focus, activeId, renderW, approvedIds }) {
               pdfDoc={docs.doc1} pageNumber={page.index1 + 1} side={1} pairKey={pairKey}
               boxes={page.boxes1} textBoxes={page.textBoxes1}
               pageW={page.width1} pageH={page.height1} renderW={renderW}
-              view={view} setView={setView} activeId={activeId} approvedIds={approvedIds}
+              view={view} setView={setView} activeId={activeId} approved={approved}
               label={`Документ 1 — стр. ${page.index1 + 1}`}
             />
             <PageView
               pdfDoc={docs.doc2} pageNumber={page.index2 + 1} side={2} pairKey={pairKey}
               boxes={page.boxes2} textBoxes={page.textBoxes2}
               pageW={page.width2} pageH={page.height2} renderW={renderW}
-              view={view} setView={setView} activeId={activeId} approvedIds={approvedIds}
+              view={view} setView={setView} activeId={activeId} approved={approved}
               label={`Документ 2 — стр. ${page.index2 + 1}`}
             />
           </div>
@@ -463,18 +467,28 @@ function Workspace({ user }) {
   const totalIssues = diffs.length + removedCount + addedCount + heavyCount
   const renderW = (result?.totalPairs || 0) > 8 ? 1600 : 2800
 
-  //позиции согласования: каждое отличие + удалённые/добавленные листы
+  //позиции согласования: лист с отличиями (не каждое отличие!) и
+  //удалённые/добавленные листы
   const reviewItems = useMemo(() => {
-    const items = diffs.map((d) => ({
-      id: d.id,
-      sort: d.page,
-      page: `${d.page + 1} (док. ${d.side})`,
-      type: d.type,
-    }))
-    for (const i of result?.removed || []) {
+    if (!result) return []
+    const items = []
+    for (const p of result.pages) {
+      const total = p.boxes1.length + p.boxes2.length +
+                    p.textBoxes1.length + p.textBoxes2.length
+      if (total === 0 && !p.heavilyChanged) continue
+      items.push({
+        id: pairKeyOf(p),
+        sort: p.index1,
+        page: p.index1 === p.index2
+          ? `${p.index1 + 1}`
+          : `${p.index1 + 1} ↔ ${p.index2 + 1}`,
+        type: p.heavilyChanged ? 'сильно изменена' : `отличий: ${total}`,
+      })
+    }
+    for (const i of result.removed || []) {
       items.push({ id: `removed-${i}`, sort: i, page: `${i + 1} (док. 1)`, type: 'лист удалён' })
     }
-    for (const j of result?.added || []) {
+    for (const j of result.added || []) {
       items.push({ id: `added-${j}`, sort: j, page: `${j + 1} (док. 2)`, type: 'лист добавлен' })
     }
     return items.sort((a, b) => a.sort - b.sort).map((it) => {
@@ -485,12 +499,8 @@ function Workspace({ user }) {
         comment: r.comment || '',
       }
     })
-  }, [diffs, result, reviews])
+  }, [result, reviews])
 
-  const approvedIds = useMemo(
-    () => new Set(Object.keys(reviews).filter((id) => reviews[id]?.approved)),
-    [reviews],
-  )
   const approvedCount = reviewItems.filter((it) => it.status === 'Согласовано').length
   const commentedCount = reviewItems.filter((it) => it.status === 'Есть замечание').length
 
@@ -673,7 +683,7 @@ function Workspace({ user }) {
               <span className="summary-meta">
                 страниц: {result.numPages1} и {result.numPages2}
                 {result.elapsed > 0 && ` · ${result.elapsed} с`}
-                {reviewItems.length > 0 && ` · согласовано ${approvedCount} из ${reviewItems.length}`}
+                {reviewItems.length > 0 && ` · согласовано листов: ${approvedCount} из ${reviewItems.length}`}
               </span>
               {reviewItems.length > 0 && !busy && (
                 <button type="button" className="export-btn" onClick={exportReport}>
@@ -691,8 +701,6 @@ function Workspace({ user }) {
                   {diffs[Math.min(cur, diffs.length - 1)].type} · стр. {diffs[Math.min(cur, diffs.length - 1)].page + 1} · документ {diffs[Math.min(cur, diffs.length - 1)].side}
                 </span>
                 <button className="diffnav-show" onClick={() => goTo(cur)}>показать</button>
-                <ReviewControls id={diffs[Math.min(cur, diffs.length - 1)].id}
-                                reviews={reviews} setReview={setReview} />
               </div>
             )}
 
@@ -720,7 +728,7 @@ function Workspace({ user }) {
               return (
                 <PagePair key={pairKeyOf(entry.p)} page={entry.p} docs={docs}
                           focus={focus} activeId={diffs[cur]?.id} renderW={renderW}
-                          approvedIds={approvedIds} />
+                          reviews={reviews} setReview={setReview} />
               )
             })}
           </div>

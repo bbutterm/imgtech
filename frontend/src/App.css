@@ -33,6 +33,18 @@ body {
   gap: 12px;
   font-size: 0.85rem;
   opacity: 0.85;
+  min-width: 0;
+  flex-shrink: 1;
+}
+.topbar-user span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+@media (max-width: 520px) {
+  .topbar-user span { display: none; }
+  .tagline { display: none; }
 }
 .logout-btn {
   padding: 6px 14px;
@@ -281,6 +293,15 @@ button:disabled { opacity: 0.55; cursor: not-allowed; }
 
 .page-pair { margin-bottom: 32px; }
 .page-pair h3 { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.page-pair.approved-page {
+  border-left: 4px solid #2e7d32;
+  padding-left: 12px;
+}
+.page-pair h3 .review-controls {
+  flex: 0 1 420px;
+  margin-left: auto;
+  font-size: 0.85rem;
+}
 
 .badge {
   font-size: 0.75rem;

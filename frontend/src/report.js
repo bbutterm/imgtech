@@ -19,7 +19,7 @@ export async function buildReportDoc(meta, items) {
 
   const headerRow = new TableRow({
     tableHeader: true,
-    children: ['№', 'Страница', 'Тип', 'Статус', 'Комментарий']
+    children: ['№', 'Лист', 'Изменения', 'Статус', 'Комментарий']
       .map((t, c) => cell(t, c, { bold: true, shade: true })),
   })
   const rows = items.map((it, idx) => new TableRow({
@@ -49,7 +49,7 @@ export async function buildReportDoc(meta, items) {
         line(`Документ 1: ${meta.file1}`),
         line(`Документ 2: ${meta.file2}`),
         line(`Дата: ${meta.date}`),
-        line(`Отличий: ${meta.total} · Согласовано: ${meta.approved} · С замечаниями: ${meta.commented}`),
+        line(`Листов с изменениями: ${meta.total} · Согласовано: ${meta.approved} · С замечаниями: ${meta.commented}`),
         new Table({
           layout: TableLayoutType.FIXED,
           width: { size: COLS.reduce((a, b) => a + b, 0), type: WidthType.DXA },
