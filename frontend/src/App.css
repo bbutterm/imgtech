@@ -209,6 +209,7 @@ button:disabled { opacity: 0.55; cursor: not-allowed; }
   z-index: 10;
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 10px;
   padding: 8px 14px;
   border-radius: 10px;
@@ -216,6 +217,40 @@ button:disabled { opacity: 0.55; cursor: not-allowed; }
   color: #f2f2f4;
   box-shadow: 0 2px 10px rgba(0, 0, 0, 0.25);
   margin-bottom: 12px;
+}
+
+.review-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  min-width: 260px;
+  font-weight: 400;
+}
+.review-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.85rem;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.review-comment {
+  flex: 1;
+  min-width: 140px;
+  padding: 6px 10px;
+  font-size: 0.85rem;
+  border: 1px solid rgba(128, 128, 128, 0.45);
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+}
+
+.export-btn {
+  margin-left: auto;
+  padding: 8px 16px;
+  font-size: 0.85rem;
+  background: #2e7d32;
 }
 .diffnav button {
   padding: 4px 14px;
@@ -282,6 +317,7 @@ button:disabled { opacity: 0.55; cursor: not-allowed; }
 .box { position: absolute; pointer-events: none; border-style: solid; }
 .box-graphics { border-color: #e53935; }
 .box-text { border-color: #fb8c00; }
+.box.approved { border-color: #2e7d32; }
 .box.active { animation: pulse 1.2s ease-in-out infinite; }
 @keyframes pulse {
   0%, 100% { box-shadow: 0 0 0 0 rgba(229, 57, 53, 0.55); }

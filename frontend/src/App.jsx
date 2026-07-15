@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import * as pdfjsLib from 'pdfjs-dist'
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
 import { supabase } from './supabase'
+import { downloadReport } from './report.js'
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl
 
@@ -21,6 +22,22 @@ function claimSession(uid) {
   const sid = crypto.randomUUID()
   localStorage.setItem(sidKey(uid), sid)
   supabase.from('sessions').upsert({ uid, sid }).then(() => {}, () => {})
+}
+
+function ReviewControls({ id, reviews, setReview }) {
+  const r = reviews[id] || {}
+  return (
+    <span className="review-controls">
+      <label className="review-check">
+        <input type="checkbox" checked={!!r.approved}
+               onChange={(e) => setReview(id, { approved: e.target.checked })} />
+        согласовано
+      </label>
+      <input className="review-comment" placeholder="комментарий…"
+             value={r.comment || ''}
+             onChange={(e) => setReview(id, { comment: e.target.value })} />
+    </span>
+  )
 }
 
 function Dropzone({ label, file, onFile }) {
@@ -100,7 +117,8 @@ function LazyMount({ height, force, children }) {
 }
 
 function PageView({ pdfDoc, pageNumber, boxes, textBoxes, pageW, pageH,
-                    view, setView, label, activeId, side, pairKey, renderW }) {
+                    view, setView, label, activeId, side, pairKey, renderW,
+                    approvedIds }) {
   const canvasRef = useRef(null)
   const vpRef = useRef(null)
   const dragRef = useRef(null)
@@ -182,11 +200,13 @@ function PageView({ pdfDoc, pageNumber, boxes, textBoxes, pageW, pageH,
           <canvas ref={canvasRef} />
           {boxes.map((b, i) => {
             const id = `${side}-graphics-${pairKey}-${i}`
-            return <div key={id} className={`box box-graphics${id === activeId ? ' active' : ''}`} style={boxStyle(b)} />
+            const cls = `box box-graphics${id === activeId ? ' active' : ''}${approvedIds?.has(id) ? ' approved' : ''}`
+            return <div key={id} className={cls} style={boxStyle(b)} />
           })}
           {textBoxes.map((b, i) => {
             const id = `${side}-text-${pairKey}-${i}`
-            return <div key={id} className={`box box-text${id === activeId ? ' active' : ''}`} style={boxStyle(b)} />
+            const cls = `box box-text${id === activeId ? ' active' : ''}${approvedIds?.has(id) ? ' approved' : ''}`
+            return <div key={id} className={cls} style={boxStyle(b)} />
           })}
         </div>
         {view.z > 1.01 && (
@@ -200,7 +220,7 @@ function PageView({ pdfDoc, pageNumber, boxes, textBoxes, pageW, pageH,
   )
 }
 
-function PagePair({ page, docs, focus, activeId, renderW }) {
+function PagePair({ page, docs, focus, activeId, renderW, approvedIds }) {
   const [view, setView] = useState({ z: 1, tx: 0, ty: 0 })
   const secRef = useRef(null)
   const pairKey = pairKeyOf(page)
@@ -256,14 +276,14 @@ function PagePair({ page, docs, focus, activeId, renderW }) {
               pdfDoc={docs.doc1} pageNumber={page.index1 + 1} side={1} pairKey={pairKey}
               boxes={page.boxes1} textBoxes={page.textBoxes1}
               pageW={page.width1} pageH={page.height1} renderW={renderW}
-              view={view} setView={setView} activeId={activeId}
+              view={view} setView={setView} activeId={activeId} approvedIds={approvedIds}
               label={`Документ 1 — стр. ${page.index1 + 1}`}
             />
             <PageView
               pdfDoc={docs.doc2} pageNumber={page.index2 + 1} side={2} pairKey={pairKey}
               boxes={page.boxes2} textBoxes={page.textBoxes2}
               pageW={page.width2} pageH={page.height2} renderW={renderW}
-              view={view} setView={setView} activeId={activeId}
+              view={view} setView={setView} activeId={activeId} approvedIds={approvedIds}
               label={`Документ 2 — стр. ${page.index2 + 1}`}
             />
           </div>
@@ -343,6 +363,10 @@ function Workspace({ user }) {
   const [error, setError] = useState('')
   const [cur, setCur] = useState(0)
   const [focus, setFocus] = useState(null)
+  const [reviews, setReviews] = useState({})
+
+  const setReview = (id, patch) =>
+    setReviews((prev) => ({ ...prev, [id]: { ...prev[id], ...patch } }))
 
   useEffect(() => {
     if (!busy) return
@@ -383,6 +407,48 @@ function Workspace({ user }) {
   const totalIssues = diffs.length + removedCount + addedCount + heavyCount
   const renderW = (result?.totalPairs || 0) > 8 ? 1600 : 2800
 
+  //позиции согласования: каждое отличие + удалённые/добавленные листы
+  const reviewItems = useMemo(() => {
+    const items = diffs.map((d) => ({
+      id: d.id,
+      sort: d.page,
+      page: `${d.page + 1} (док. ${d.side})`,
+      type: d.type,
+    }))
+    for (const i of result?.removed || []) {
+      items.push({ id: `removed-${i}`, sort: i, page: `${i + 1} (док. 1)`, type: 'лист удалён' })
+    }
+    for (const j of result?.added || []) {
+      items.push({ id: `added-${j}`, sort: j, page: `${j + 1} (док. 2)`, type: 'лист добавлен' })
+    }
+    return items.sort((a, b) => a.sort - b.sort).map((it) => {
+      const r = reviews[it.id] || {}
+      return {
+        ...it,
+        status: r.approved ? 'Согласовано' : (r.comment ? 'Есть замечание' : '—'),
+        comment: r.comment || '',
+      }
+    })
+  }, [diffs, result, reviews])
+
+  const approvedIds = useMemo(
+    () => new Set(Object.keys(reviews).filter((id) => reviews[id]?.approved)),
+    [reviews],
+  )
+  const approvedCount = reviewItems.filter((it) => it.status === 'Согласовано').length
+  const commentedCount = reviewItems.filter((it) => it.status === 'Есть замечание').length
+
+  async function exportReport() {
+    await downloadReport({
+      file1: file1?.name || 'документ 1',
+      file2: file2?.name || 'документ 2',
+      date: new Date().toISOString().slice(0, 10),
+      total: reviewItems.length,
+      approved: approvedCount,
+      commented: commentedCount,
+    }, reviewItems)
+  }
+
   function goTo(idx) {
     if (!diffs.length) return
     const i = (idx + diffs.length) % diffs.length
@@ -404,6 +470,7 @@ function Workspace({ user }) {
     setDocs(null)
     setFocus(null)
     setCur(0)
+    setReviews({})
     setProgress({ done: 0, total: 0 })
     setStage('Подготовка файлов')
 
@@ -550,7 +617,13 @@ function Workspace({ user }) {
               <span className="summary-meta">
                 страниц: {result.numPages1} и {result.numPages2}
                 {result.elapsed > 0 && ` · ${result.elapsed} с`}
+                {reviewItems.length > 0 && ` · согласовано ${approvedCount} из ${reviewItems.length}`}
               </span>
+              {reviewItems.length > 0 && !busy && (
+                <button type="button" className="export-btn" onClick={exportReport}>
+                  Выгрузить отчёт (DOCX)
+                </button>
+              )}
             </div>
 
             {diffs.length > 0 && (
@@ -562,6 +635,8 @@ function Workspace({ user }) {
                   {diffs[Math.min(cur, diffs.length - 1)].type} · стр. {diffs[Math.min(cur, diffs.length - 1)].page + 1} · документ {diffs[Math.min(cur, diffs.length - 1)].side}
                 </span>
                 <button className="diffnav-show" onClick={() => goTo(cur)}>показать</button>
+                <ReviewControls id={diffs[Math.min(cur, diffs.length - 1)].id}
+                                reviews={reviews} setReview={setReview} />
               </div>
             )}
 
@@ -576,6 +651,7 @@ function Workspace({ user }) {
                     <h3>
                       Лист {entry.i + 1} документа 1
                       <span className="badge badge-diff">удалён во второй версии</span>
+                      <ReviewControls id={`removed-${entry.i}`} reviews={reviews} setReview={setReview} />
                     </h3>
                   </section>
                 )
@@ -586,13 +662,15 @@ function Workspace({ user }) {
                     <h3>
                       Лист {entry.j + 1} документа 2
                       <span className="badge badge-diff">добавлен во второй версии</span>
+                      <ReviewControls id={`added-${entry.j}`} reviews={reviews} setReview={setReview} />
                     </h3>
                   </section>
                 )
               }
               return (
                 <PagePair key={pairKeyOf(entry.p)} page={entry.p} docs={docs}
-                          focus={focus} activeId={diffs[cur]?.id} renderW={renderW} />
+                          focus={focus} activeId={diffs[cur]?.id} renderW={renderW}
+                          approvedIds={approvedIds} />
               )
             })}
           </div>
