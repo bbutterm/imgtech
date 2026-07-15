@@ -240,7 +240,7 @@ function PagePair({ page, docs, focus, activeId, renderW }) {
         {total > 0 && <span className="badge badge-diff">{total} отличий</span>}
         {page.heavilyChanged && (
           <span className="badge badge-warn">
-            страница сильно изменена — рамки не показываются
+            страница сильно изменена — показаны зоны изменений
           </span>
         )}
         {page.truncated && (

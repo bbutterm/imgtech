@@ -162,6 +162,49 @@ def _box_area(b):
 	return (b[2] - b[0]) * (b[3] - b[1])
 
 
+def _merge_boxes(boxes, gap=12.0):
+	"""Объединяет рамки, лежащие ближе gap друг к другу, в общие рамки.
+
+	Несколько исправленных слов подряд или соседние мелкие правки образуют
+	одну рамку — считаются одним отличием, а не десятком.
+	"""
+	boxes = [list(b) for b in boxes]
+	merged = True
+	while merged:
+		merged = False
+		out = []
+		for b in boxes:
+			hit = None
+			for m in out:
+				if (b[0] - gap <= m[2] and b[2] + gap >= m[0] and
+				    b[1] - gap <= m[3] and b[3] + gap >= m[1]):
+					hit = m
+					break
+			if hit is None:
+				out.append(b)
+			else:
+				hit[0] = min(hit[0], b[0])
+				hit[1] = min(hit[1], b[1])
+				hit[2] = max(hit[2], b[2])
+				hit[3] = max(hit[3], b[3])
+				merged = True
+		boxes = out
+	return boxes
+
+
+def _cap_boxes(boxes1, boxes2, tb1, tb2, limit):
+	"""Глобальный потолок: оставляет крупнейшие рамки по всем спискам."""
+	tagged = ([(b, 0) for b in boxes1] + [(b, 1) for b in boxes2] +
+	          [(b, 2) for b in tb1] + [(b, 3) for b in tb2])
+	if len(tagged) <= limit:
+		return boxes1, boxes2, tb1, tb2, False
+	tagged.sort(key=lambda t: _box_area(t[0]), reverse=True)
+	kept = ([], [], [], [])
+	for box, kind in tagged[:limit]:
+		kept[kind].append(box)
+	return kept[0], kept[1], kept[2], kept[3], True
+
+
 def compare_pairs(doc1, doc2, pairs):
 	"""Сравнивает заданные пары страниц, ограничивая объём выдачи."""
 	pages = []
@@ -172,21 +215,29 @@ def compare_pairs(doc1, doc2, pairs):
 		r = compare_page_vectors(p1, p2)
 		heavy = r["unmatched_share"] > HEAVY_SHARE
 
-		boxes1, boxes2, tb1, tb2 = [], [], [], []
 		truncated = False
-		if not heavy:
-			boxes1 = [list(b) for b in r["boxes1"]]
-			boxes2 = [list(b) for b in r["boxes2"]]
+		if heavy:
+			#страница переработана: вместо тысяч мелких рамок — крупные зоны
+			#изменений, чтобы лист всё равно можно было посмотреть глазами
+			boxes1 = sorted(_merge_boxes(r["boxes1"], gap=40),
+			                key=_box_area, reverse=True)[:30]
+			boxes2 = sorted(_merge_boxes(r["boxes2"], gap=40),
+			                key=_box_area, reverse=True)[:30]
+			tb1, tb2 = [], []
+		else:
 			tb1, tb2 = text_diff_boxes(p1, p2)
 			#подписи, исчезнувшие вместе с графическим фрагментом, уже накрыты
 			#его рамкой — отдельными отличиями их не считаем
 			tb1 = [b for b in tb1 if not _inside(b, r["boxes1"])]
 			tb2 = [b for b in tb2 if not _inside(b, r["boxes2"])]
-			if len(boxes1) + len(boxes2) + len(tb1) + len(tb2) > MAX_BOXES_PER_PAGE:
-				boxes1 = sorted(boxes1, key=_box_area, reverse=True)[:MAX_BOXES_PER_PAGE // 2]
-				boxes2 = sorted(boxes2, key=_box_area, reverse=True)[:MAX_BOXES_PER_PAGE // 2]
-				tb1, tb2 = [], []
-				truncated = True
+			#соседние правки склеиваются в одну рамку (несколько слов подряд,
+			#группа мелких изменений рядом — одно отличие)
+			boxes1 = _merge_boxes(r["boxes1"], gap=15)
+			boxes2 = _merge_boxes(r["boxes2"], gap=15)
+			tb1 = _merge_boxes(tb1, gap=12)
+			tb2 = _merge_boxes(tb2, gap=12)
+			boxes1, boxes2, tb1, tb2, truncated = _cap_boxes(
+				boxes1, boxes2, tb1, tb2, MAX_BOXES_PER_PAGE)
 
 		pages.append({
 			"index1": i,
