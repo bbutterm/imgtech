@@ -6,7 +6,10 @@ import { downloadReport } from './report.js'
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl
 
-const VIEW_W = 620          // ширина вьюпорта страницы, px
+//ширина вьюпорта страницы: на узких экранах ужимается, чтобы разворот
+//и панель согласования не уезжали за край
+const VIEW_W = Math.min(620, Math.max(320,
+  (typeof window !== 'undefined' ? window.innerWidth : 660) - 40))
 const DIRECT_LIMIT_MB = 3.5 // мельче — напрямую в API, крупнее — через хранилище
 const MAX_FILE_MB = 50      // лимит Supabase Storage на один файл
 const BATCH_SIZE = 6        // пар страниц на один запрос к API
@@ -289,6 +292,59 @@ function PagePair({ page, docs, focus, activeId, renderW, approvedIds }) {
           </div>
         </LazyMount>
       )}
+    </section>
+  )
+}
+
+//лист, существующий только в одной версии: рендерим его, а на месте
+//второй версии — заглушка «отсутствует» того же размера
+function SheetEntry({ docs, side, pageIndex, badgeText, reviewId, reviews, setReview, renderW }) {
+  const pdfDoc = side === 1 ? docs.doc1 : docs.doc2
+  const [dims, setDims] = useState(null)
+  const [view, setView] = useState({ z: 1, tx: 0, ty: 0 })
+
+  useEffect(() => {
+    let cancelled = false
+    pdfDoc.getPage(pageIndex + 1).then((page) => {
+      if (cancelled) return
+      const vp = page.getViewport({ scale: 1 })
+      setDims({ w: vp.width, h: vp.height })
+    }).catch(() => {})
+    return () => { cancelled = true }
+  }, [pdfDoc, pageIndex])
+
+  const viewH = dims ? VIEW_W * (dims.h / dims.w) : 300
+
+  const pageView = dims && (
+    <PageView
+      pdfDoc={pdfDoc} pageNumber={pageIndex + 1} side={side}
+      pairKey={`solo-${side}-${pageIndex}`}
+      boxes={[]} textBoxes={[]} pageW={dims.w} pageH={dims.h} renderW={renderW}
+      view={view} setView={setView}
+      label={`Документ ${side} — стр. ${pageIndex + 1}`}
+    />
+  )
+  const placeholder = (
+    <div className="page-view">
+      <div className="page-label">Документ {side === 1 ? 2 : 1}</div>
+      <div className="missing-page" style={{ width: VIEW_W, height: viewH }}>
+        лист отсутствует в этой версии
+      </div>
+    </div>
+  )
+
+  return (
+    <section className="page-pair">
+      <h3>
+        Лист {pageIndex + 1} документа {side}
+        <span className="badge badge-diff">{badgeText}</span>
+        <ReviewControls id={reviewId} reviews={reviews} setReview={setReview} />
+      </h3>
+      <LazyMount height={viewH + 40}>
+        <div className="pair-row">
+          {side === 1 ? <>{pageView}{placeholder}</> : <>{placeholder}{pageView}</>}
+        </div>
+      </LazyMount>
     </section>
   )
 }
@@ -647,24 +703,18 @@ function Workspace({ user }) {
             {entries.map((entry) => {
               if (entry.kind === 'removed') {
                 return (
-                  <section className="page-pair" key={`removed-${entry.i}`}>
-                    <h3>
-                      Лист {entry.i + 1} документа 1
-                      <span className="badge badge-diff">удалён во второй версии</span>
-                      <ReviewControls id={`removed-${entry.i}`} reviews={reviews} setReview={setReview} />
-                    </h3>
-                  </section>
+                  <SheetEntry key={`removed-${entry.i}`} docs={docs} side={1}
+                              pageIndex={entry.i} badgeText="удалён во второй версии"
+                              reviewId={`removed-${entry.i}`} reviews={reviews}
+                              setReview={setReview} renderW={renderW} />
                 )
               }
               if (entry.kind === 'added') {
                 return (
-                  <section className="page-pair" key={`added-${entry.j}`}>
-                    <h3>
-                      Лист {entry.j + 1} документа 2
-                      <span className="badge badge-diff">добавлен во второй версии</span>
-                      <ReviewControls id={`added-${entry.j}`} reviews={reviews} setReview={setReview} />
-                    </h3>
-                  </section>
+                  <SheetEntry key={`added-${entry.j}`} docs={docs} side={2}
+                              pageIndex={entry.j} badgeText="добавлен во второй версии"
+                              reviewId={`added-${entry.j}`} reviews={reviews}
+                              setReview={setReview} renderW={renderW} />
                 )
               }
               return (
