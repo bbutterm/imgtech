@@ -272,8 +272,33 @@ button:disabled { opacity: 0.55; cursor: not-allowed; }
   box-shadow: 0 1px 6px rgba(0, 0, 0, 0.25);
   background: #fff;
 }
-.image-summary { font-weight: 600; margin: 14px 0 6px; }
-.diff-list { margin: 6px 0 0; padding-left: 22px; }
+.image-wrap { position: relative; display: inline-block; max-width: 100%; }
+.image-circle {
+  position: absolute;
+  border: 3px solid #e53935;
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.35);
+  pointer-events: none;
+}
+.image-circle-num {
+  position: absolute;
+  top: -10px;
+  left: -10px;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 4px;
+  border-radius: 10px;
+  background: #e53935;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.image-details { margin-top: 14px; }
+.image-details summary { cursor: pointer; font-weight: 600; opacity: 0.8; }
+.diff-list { margin: 8px 0 0; padding-left: 22px; }
 .diff-list li { margin-bottom: 6px; line-height: 1.45; }
 
 .missing-page {

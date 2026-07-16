@@ -17,14 +17,20 @@ QWEN_MODEL = os.environ.get("QWEN_MODEL", "qwen-vl-plus")
 PROMPT = (
 	"Перед тобой две версии одного изображения (интерьерная визуализация, "
 	"рендер или чертёж): первое изображение — версия 1, второе — версия 2. "
-	"Перечисли предметные отличия версии 2 от версии 1: что добавлено, "
-	"удалено или изменено (мебель, конструкции, отделка, оборудование, "
-	"расстановка). Игнорируй шум рендера, артефакты сжатия и мелкие отличия "
-	"освещения, если они не вызваны изменением объектов. Если ракурсы камер "
-	"различаются — сравнивай состав сцены, а не положение пикселей. "
+	"Найди предметные отличия версии 2 от версии 1: что добавлено, удалено "
+	"или изменено (мебель, конструкции, отделка, оборудование, расстановка). "
+	"Игнорируй шум рендера, артефакты сжатия и мелкие отличия освещения, "
+	"если они не вызваны изменением объектов. Если ракурсы камер различаются "
+	"— сравнивай состав сцены, а не положение пикселей. "
+	"Для каждого отличия укажи, где оно расположено на каждой версии: "
+	"прямоугольник [x0, y0, x1, y1] в тысячных долях ширины и высоты "
+	"соответствующего изображения (числа 0–1000). Если объект есть только "
+	"в одной версии, для другой укажи область, где он был/должен был быть; "
+	"если место указать нельзя — null. "
 	"Ответь строго JSON без пояснений: "
 	'{"summary": "одно предложение об общем характере изменений", '
-	'"differences": ["отличие 1", "отличие 2", …]}. '
+	'"differences": [{"what": "краткое описание", '
+	'"box1": [x0, y0, x1, y1], "box2": [x0, y0, x1, y1]}]}. '
 	"Если предметных отличий нет — differences: []."
 )
 
@@ -63,12 +69,28 @@ def compare_images(images):
 	return _parse(out["choices"][0]["message"]["content"])
 
 
-def _to_text(item):
+def _norm_box(b):
+	"""Валидный прямоугольник в тысячных долях (0–1000) либо None."""
+	try:
+		x0, y0, x1, y1 = (max(0.0, min(1000.0, float(v))) for v in b)
+	except Exception:
+		return None
+	if x1 - x0 < 5 or y1 - y0 < 5:
+		return None
+	return [x0, y0, x1, y1]
+
+
+def _norm_diff(item):
 	if isinstance(item, str):
-		return item
+		return {"what": item, "box1": None, "box2": None}
 	if isinstance(item, dict):
-		return " — ".join(str(v) for v in item.values() if v)
-	return str(item)
+		what = str(item.get("what") or item.get("label") or
+		           " — ".join(str(v) for k, v in item.items()
+		                      if k not in ("box1", "box2") and v))
+		return {"what": what,
+		        "box1": _norm_box(item.get("box1")),
+		        "box2": _norm_box(item.get("box2"))}
+	return {"what": str(item), "box1": None, "box2": None}
 
 
 def _parse(text):
@@ -80,9 +102,9 @@ def _parse(text):
 			data = json.loads(text[start:end + 1])
 			return {
 				"summary": str(data.get("summary", "")),
-				"differences": [_to_text(d) for d in data.get("differences", [])][:30],
+				"differences": [_norm_diff(d) for d in data.get("differences", [])][:30],
 			}
 		except Exception:
 			pass
 	lines = [l.strip("-•*# \t") for l in text.splitlines() if l.strip()]
-	return {"summary": "", "differences": lines[:30]}
+	return {"summary": "", "differences": [_norm_diff(l) for l in lines][:30]}

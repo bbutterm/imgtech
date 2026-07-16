@@ -792,22 +792,41 @@ function Workspace({ user }) {
                 <ReviewControls id="images" reviews={reviews} setReview={setReview} />
               </h3>
               <div className="pair-row">
-                <div className="page-view">
-                  <div className="page-label">Версия 1 — {file1?.name}</div>
-                  <img className="image-view" style={{ width: VIEW_W }}
-                       src={imagePreviews[0]} alt="Версия 1" />
-                </div>
-                <div className="page-view">
-                  <div className="page-label">Версия 2 — {file2?.name}</div>
-                  <img className="image-view" style={{ width: VIEW_W }}
-                       src={imagePreviews[1]} alt="Версия 2" />
-                </div>
+                {[0, 1].map((side) => (
+                  <div className="page-view" key={side}>
+                    <div className="page-label">
+                      Версия {side + 1} — {(side === 0 ? file1 : file2)?.name}
+                    </div>
+                    <div className="image-wrap" style={{ width: VIEW_W }}>
+                      <img className="image-view" src={imagePreviews[side]}
+                           alt={`Версия ${side + 1}`} />
+                      {imageResult.differences.map((d, i) => {
+                        const b = side === 0 ? d.box1 : d.box2
+                        if (!b) return null
+                        return (
+                          <div key={i} className="image-circle" title={d.what} style={{
+                            left: `${b[0] / 10}%`,
+                            top: `${b[1] / 10}%`,
+                            width: `${(b[2] - b[0]) / 10}%`,
+                            height: `${(b[3] - b[1]) / 10}%`,
+                          }}>
+                            <span className="image-circle-num">{i + 1}</span>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </div>
+                ))}
               </div>
-              {imageResult.summary && <p className="image-summary">{imageResult.summary}</p>}
               {imageResult.differences.length > 0 && (
-                <ol className="diff-list">
-                  {imageResult.differences.map((d, i) => <li key={i}>{d}</li>)}
-                </ol>
+                <details className="image-details">
+                  <summary>
+                    {imageResult.summary || 'Список отличий'} — подробнее
+                  </summary>
+                  <ol className="diff-list">
+                    {imageResult.differences.map((d, i) => <li key={i}>{d.what}</li>)}
+                  </ol>
+                </details>
               )}
             </section>
           </div>
