@@ -50,8 +50,16 @@ def compare_images(images):
 		data=json.dumps(payload).encode(),
 		headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"},
 	)
-	with urllib.request.urlopen(req, timeout=120) as resp:
-		out = json.loads(resp.read())
+	try:
+		with urllib.request.urlopen(req, timeout=120) as resp:
+			out = json.loads(resp.read())
+	except urllib.error.HTTPError as e:
+		#диагностика настройки: 401 — ключ, 404 — модель/URL, 429 — лимиты
+		hint = {401: "провайдер отклонил ключ (проверьте QWEN_API_KEY)",
+		        403: "доступ запрещён (проверьте ключ и площадку)",
+		        404: "модель или адрес не найдены (проверьте QWEN_MODEL/QWEN_BASE_URL)",
+		        429: "исчерпан лимит запросов у провайдера"}
+		raise RuntimeError(hint.get(e.code, f"ошибка провайдера модели ({e.code})"))
 	return _parse(out["choices"][0]["message"]["content"])
 
 
