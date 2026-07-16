@@ -69,7 +69,7 @@ function Dropzone({ label, file, onFile }) {
       <div className="dz-label">{label}</div>
       {file
         ? <div className="dz-file">{file.name} <span>· {mb(file.size)} МБ</span></div>
-        : <div className="dz-hint">перетащите PDF или изображение</div>}
+        : <div className="dz-hint">загрузите PDF или фото (JPG/PNG)</div>}
     </div>
   )
 }

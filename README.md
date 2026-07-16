@@ -107,6 +107,17 @@ Vercel serverless (Python, FastAPI)  ── проверка токена ──
 два PDF → векторный конвейер, два изображения → vision-режим,
 смешанное → ошибка пользователю.
 
+Каждый успешный ИИ-запрос журналируется в таблицу `public.ai_usage`
+(uid, model, at) — запись идёт токеном самого пользователя через
+PostgREST, RLS не позволяет записать чужой uid. Статистика по аккаунтам —
+в Supabase (SQL Editor):
+
+```sql
+select u.email, count(*) as requests, max(a.at) as last_request
+from ai_usage a join auth.users u on u.id = a.uid
+group by u.email order by requests desc;
+```
+
 **План** — сопоставление страниц по содержимому (difflib по спискам слов,
 окно ±10 от диагонали, жадное связывание, порог 0.5):
 
