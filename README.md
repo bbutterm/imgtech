@@ -88,6 +88,24 @@ Vercel serverless (Python, FastAPI)  ── проверка токена ──
 | `POST /api/plan-urls` | JSON `{url1,url2}` — подписанные ссылки Storage | план |
 | `POST /api/compare-batch` | multipart + поле `pairs` (JSON-строка, ≤12 пар) | `{pages:[…], elapsed}` |
 | `POST /api/compare-batch-urls` | JSON `{url1,url2,pairs}` | то же |
+| `POST /api/compare-images` | multipart, два JPG/PNG/WebP | `{summary, differences[], model, elapsed}` |
+| `POST /api/compare-images-urls` | JSON `{url1,url2}` (ссылки Storage) | то же |
+
+**Режим изображений** (`api/vision.py`): две картинки уходят в
+мультимодальную LLM (Qwen-VL, OpenAI-совместимый API), ответ — текстовый
+список предметных отличий. Работает и при разных ракурсах камеры.
+Настройка — переменные окружения Vercel (единственные секреты проекта,
+в репозиторий не попадают):
+
+| Переменная | Значение |
+|---|---|
+| `QWEN_API_KEY` | ключ DashScope/совместимого API — **обязательна**, без неё эндпоинты отвечают 503 |
+| `QWEN_BASE_URL` | опционально; по умолчанию `https://dashscope-intl.aliyuncs.com/compatible-mode/v1` |
+| `QWEN_MODEL` | опционально; по умолчанию `qwen-vl-plus` |
+
+Тип сравнения выбирается на фронте по типу загруженных файлов:
+два PDF → векторный конвейер, два изображения → vision-режим,
+смешанное → ошибка пользователю.
 
 **План** — сопоставление страниц по содержимому (difflib по спискам слов,
 окно ±10 от диагонали, жадное связывание, порог 0.5):

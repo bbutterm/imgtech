@@ -14,6 +14,7 @@
     uvicorn api.index:app --port 8000
 """
 
+import base64
 import difflib as dl
 import json
 import time
@@ -27,9 +28,11 @@ from pydantic import BaseModel
 try:
 	from api.vector_compare import compare_page_vectors  #локальный запуск
 	from api.supabase_auth import verify_token, SUPABASE_URL
+	from api import vision
 except ImportError:
 	from vector_compare import compare_page_vectors  #рантайм Vercel
 	from supabase_auth import verify_token, SUPABASE_URL
+	import vision
 
 app = FastAPI()
 
@@ -348,3 +351,50 @@ async def compare_batch_urls(payload: BatchUrlsIn,
 	started = time.time()
 	pages = compare_pairs(doc1, doc2, pair_list)
 	return {"pages": pages, "elapsed": round(time.time() - started, 2)}
+
+
+#--- режим изображений: описание отличий мультимодальной моделью ---
+
+IMAGE_MIME = {"image/jpeg", "image/png", "image/webp"}
+
+
+def _vision_response(images, started):
+	try:
+		result = vision.compare_images(images)
+	except RuntimeError as e:
+		return JSONResponse({"error": str(e)}, status_code=503)
+	except Exception:
+		return JSONResponse({"error": "Сервис анализа изображений недоступен, попробуйте позже"},
+		                    status_code=502)
+	return {**result, "model": vision.QWEN_MODEL,
+	        "elapsed": round(time.time() - started, 2)}
+
+
+@app.post("/api/compare-images")
+async def compare_images_direct(file1: UploadFile = File(...), file2: UploadFile = File(...),
+                                authorization: str = Header(default="")):
+	denied = _check_auth(authorization)
+	if denied:
+		return denied
+	if (file1.content_type not in IMAGE_MIME or file2.content_type not in IMAGE_MIME):
+		return JSONResponse({"error": "Ожидаются два изображения (JPG/PNG/WebP)"},
+		                    status_code=400)
+	started = time.time()
+	images = [
+		{"b64": base64.b64encode(await file1.read()).decode(), "mime": file1.content_type},
+		{"b64": base64.b64encode(await file2.read()).decode(), "mime": file2.content_type},
+	]
+	return _vision_response(images, started)
+
+
+@app.post("/api/compare-images-urls")
+async def compare_images_urls(payload: UrlsIn, authorization: str = Header(default="")):
+	denied = _check_auth(authorization)
+	if denied:
+		return denied
+	prefix = f"{SUPABASE_URL}/storage/v1/object/sign/uploads/"
+	if not (payload.url1.startswith(prefix) and payload.url2.startswith(prefix)):
+		return JSONResponse({"error": "недопустимый источник файла"}, status_code=400)
+	started = time.time()
+	#подписанные ссылки отдаём модели напрямую — она скачает их сама
+	return _vision_response([{"url": payload.url1}, {"url": payload.url2}], started)

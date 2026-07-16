@@ -16,6 +16,8 @@ const BATCH_SIZE = 6        // пар страниц на один запрос 
 
 const mb = (bytes) => (bytes / 1024 / 1024).toFixed(2)
 const pairKeyOf = (p) => `${p.index1}_${p.index2}`
+const isImageFile = (f) =>
+  !!f && (f.type.startsWith('image/') || /\.(jpe?g|png|webp)$/i.test(f.name))
 
 const sidKey = (uid) => `imgtech-sid:${uid}`
 
@@ -60,13 +62,14 @@ function Dropzone({ label, file, onFile }) {
       }}
     >
       <input
-        ref={inputRef} type="file" accept=".pdf,application/pdf" hidden
+        ref={inputRef} type="file" hidden
+        accept=".pdf,application/pdf,image/jpeg,image/png,image/webp"
         onChange={(e) => onFile(e.target.files?.[0] || null)}
       />
       <div className="dz-label">{label}</div>
       {file
         ? <div className="dz-file">{file.name} <span>· {mb(file.size)} МБ</span></div>
-        : <div className="dz-hint">перетащите PDF или нажмите</div>}
+        : <div className="dz-hint">перетащите PDF или изображение</div>}
     </div>
   )
 }
@@ -424,6 +427,8 @@ function Workspace({ user }) {
   const [cur, setCur] = useState(0)
   const [focus, setFocus] = useState(null)
   const [reviews, setReviews] = useState({})
+  const [imageResult, setImageResult] = useState(null) //режим изображений
+  const [imagePreviews, setImagePreviews] = useState(null)
 
   const setReview = (id, patch) =>
     setReviews((prev) => ({ ...prev, [id]: { ...prev[id], ...patch } }))
@@ -523,16 +528,120 @@ function Workspace({ user }) {
     setFocus({ pairKey: d.pairKey, box: d.box, seq: Date.now() })
   }
 
+  //общая подготовка транспорта: мелкие файлы напрямую, крупные через Storage
+  async function makeTransport(endpoints, cleanupRef) {
+    const { data: sessionData } = await supabase.auth.getSession()
+    const token = sessionData.session?.access_token
+    if (!token) throw new Error('Сессия истекла — обновите страницу и войдите заново.')
+    const authH = { Authorization: `Bearer ${token}` }
+
+    if (file1.size + file2.size < DIRECT_LIMIT_MB * 1024 * 1024) {
+      const formData = (extra) => {
+        const fd = new FormData()
+        fd.append('file1', file1)
+        fd.append('file2', file2)
+        if (extra) fd.append('pairs', extra)
+        return fd
+      }
+      return {
+        authH,
+        call: (name, pairs) => fetch(endpoints[name].direct, {
+          method: 'POST',
+          body: formData(pairs ? JSON.stringify(pairs) : undefined),
+          headers: authH,
+        }),
+      }
+    }
+
+    setStage('Загрузка файлов в хранилище')
+    const jobId = crypto.randomUUID()
+    const path1 = `${user.id}/${jobId}/1`
+    const path2 = `${user.id}/${jobId}/2`
+    cleanupRef.fn = () => supabase.storage.from('uploads').remove([path1, path2]).then(() => {}, () => {})
+    const [up1, up2] = await Promise.all([
+      supabase.storage.from('uploads').upload(path1, file1, { contentType: file1.type || 'application/pdf' }),
+      supabase.storage.from('uploads').upload(path2, file2, { contentType: file2.type || 'application/pdf' }),
+    ])
+    if (up1.error || up2.error) {
+      throw new Error(`Не удалось загрузить файлы: ${(up1.error || up2.error).message}`)
+    }
+    const [s1, s2] = await Promise.all([
+      supabase.storage.from('uploads').createSignedUrl(path1, 3600),
+      supabase.storage.from('uploads').createSignedUrl(path2, 3600),
+    ])
+    if (s1.error || s2.error) throw new Error('Не удалось подготовить файлы к сравнению')
+    const urls = { url1: s1.data.signedUrl, url2: s2.data.signedUrl }
+    const jsonH = { ...authH, 'Content-Type': 'application/json' }
+    return {
+      authH,
+      call: (name, pairs) => fetch(endpoints[name].urls, {
+        method: 'POST', headers: jsonH,
+        body: JSON.stringify(pairs ? { ...urls, pairs } : urls),
+      }),
+    }
+  }
+
+  const failMessage = async (resp) => {
+    if (resp.status === 401) return 'Сессия истекла — обновите страницу и войдите заново.'
+    let msg = `Ошибка сервера (${resp.status})`
+    try { msg = (await resp.json()).error || msg } catch { /* not json */ }
+    return msg
+  }
+
+  //режим изображений: список отличий от мультимодальной модели
+  async function compareImages() {
+    setBusy(true)
+    setElapsed(0)
+    setError('')
+    setImageResult(null)
+    setResult(null)
+    setDocs(null)
+    setReviews({})
+    setProgress({ done: 0, total: 0 })
+    setStage('Подготовка изображений')
+
+    const cleanupRef = { fn: () => {} }
+    try {
+      const transport = await makeTransport({
+        images: { direct: '/api/compare-images', urls: '/api/compare-images-urls' },
+      }, cleanupRef)
+      setStage('Модель изучает изображения')
+      const resp = await transport.call('images')
+      if (!resp.ok) throw new Error(await failMessage(resp))
+      const data = await resp.json()
+      setImagePreviews([URL.createObjectURL(file1), URL.createObjectURL(file2)])
+      setImageResult(data)
+    } catch (err) {
+      if (err instanceof TypeError) {
+        setError('Не удалось связаться с сервером. Проверьте соединение и попробуйте ещё раз.')
+      } else {
+        setError(String(err.message || err))
+      }
+    } finally {
+      cleanupRef.fn()
+      setBusy(false)
+    }
+  }
+
   async function handleCompare(e) {
     e.preventDefault()
     if (!file1 || !file2) {
-      setError('Выберите оба PDF-файла')
+      setError('Выберите оба файла')
       return
     }
+    const img1 = isImageFile(file1)
+    const img2 = isImageFile(file2)
+    if (img1 !== img2) {
+      setError('Файлы должны быть одного типа: два PDF или два изображения.')
+      return
+    }
+    if (img1) return compareImages()
+
     setBusy(true)
     setElapsed(0)
     setError('')
     setResult(null)
+    setImageResult(null)
     setDocs(null)
     setFocus(null)
     setCur(0)
@@ -666,6 +775,43 @@ function Workspace({ user }) {
 
         {busy && <Progress stage={stage} done={progress.done} total={progress.total} elapsed={elapsed} />}
         {error && <div className="error">{error}</div>}
+
+        {imageResult && imagePreviews && (
+          <div className="results">
+            <div className={`summary ${imageResult.differences.length === 0 ? 'summary-ok' : 'summary-diff'}`}>
+              {imageResult.differences.length === 0
+                ? <strong>✓ Предметных отличий не найдено</strong>
+                : <strong>Найдено отличий: {imageResult.differences.length}</strong>}
+              <span className="summary-meta">
+                анализ ИИ · {imageResult.model} · {imageResult.elapsed} с
+              </span>
+            </div>
+            <section className={`page-pair${reviews.images?.approved ? ' approved-page' : ''}`}>
+              <h3>
+                Изображения
+                <ReviewControls id="images" reviews={reviews} setReview={setReview} />
+              </h3>
+              <div className="pair-row">
+                <div className="page-view">
+                  <div className="page-label">Версия 1 — {file1?.name}</div>
+                  <img className="image-view" style={{ width: VIEW_W }}
+                       src={imagePreviews[0]} alt="Версия 1" />
+                </div>
+                <div className="page-view">
+                  <div className="page-label">Версия 2 — {file2?.name}</div>
+                  <img className="image-view" style={{ width: VIEW_W }}
+                       src={imagePreviews[1]} alt="Версия 2" />
+                </div>
+              </div>
+              {imageResult.summary && <p className="image-summary">{imageResult.summary}</p>}
+              {imageResult.differences.length > 0 && (
+                <ol className="diff-list">
+                  {imageResult.differences.map((d, i) => <li key={i}>{d}</li>)}
+                </ol>
+              )}
+            </section>
+          </div>
+        )}
 
         {result && docs && (
           <div className="results">

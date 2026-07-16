@@ -265,6 +265,17 @@ button:disabled { opacity: 0.55; cursor: not-allowed; }
   background: #2e7d32;
 }
 
+.image-view {
+  display: block;
+  height: auto;
+  max-width: 100%;
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.25);
+  background: #fff;
+}
+.image-summary { font-weight: 600; margin: 14px 0 6px; }
+.diff-list { margin: 6px 0 0; padding-left: 22px; }
+.diff-list li { margin-bottom: 6px; line-height: 1.45; }
+
 .missing-page {
   display: flex;
   align-items: center;
