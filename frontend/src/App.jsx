@@ -2,7 +2,6 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import * as pdfjsLib from 'pdfjs-dist'
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
 import { supabase } from './supabase'
-import { downloadReport } from './report.js'
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl
 
@@ -13,16 +12,39 @@ const VIEW_W = Math.min(620, Math.max(300,
 const DIRECT_LIMIT_MB = 3.5 // мельче — напрямую в API, крупнее — через хранилище
 const MAX_FILE_MB = 50      // лимит Supabase Storage на один файл
 const BATCH_SIZE = 6        // пар страниц на один запрос к API
+const API_TIMEOUT_MS = 120000
+const USE_BACKGROUND_JOBS = import.meta.env.VITE_USE_BACKGROUND_JOBS === 'true'
 
 const mb = (bytes) => (bytes / 1024 / 1024).toFixed(2)
 const pairKeyOf = (p) => `${p.index1}_${p.index2}`
+
+function fetchWithTimeout(url, options = {}) {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), API_TIMEOUT_MS)
+  return fetch(url, { ...options, signal: controller.signal })
+    .finally(() => clearTimeout(timer))
+}
 
 const sidKey = (uid) => `imgtech-sid:${uid}`
 
 //записывает ID новой активной сессии — все остальные устройства этого
 //пользователя увидят изменение и разлогинятся
+async function responseError(resp) {
+  if (resp.status === 401) return 'Сессия истекла — обновите страницу и войдите заново.'
+  let msg = `Ошибка сервера (${resp.status})`
+  try { msg = (await resp.json()).error || msg } catch { /* not json */ }
+  return msg
+}
+
+function newSessionId() {
+  if (typeof crypto.randomUUID === 'function') return crypto.randomUUID()
+  return Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) =>
+    byte.toString(16).padStart(2, '0'),
+  ).join('')
+}
+
 function claimSession(uid) {
-  const sid = crypto.randomUUID()
+  const sid = newSessionId()
   localStorage.setItem(sidKey(uid), sid)
   supabase.from('sessions').upsert({ uid, sid }).then(() => {}, () => {})
 }
@@ -505,6 +527,7 @@ function Workspace({ user }) {
   const commentedCount = reviewItems.filter((it) => it.status === 'Есть замечание').length
 
   async function exportReport() {
+    const { downloadReport } = await import('./report.js')
     await downloadReport({
       file1: file1?.name || 'документ 1',
       file2: file2?.name || 'документ 2',
@@ -540,12 +563,49 @@ function Workspace({ user }) {
     setProgress({ done: 0, total: 0 })
     setStage('Подготовка файлов')
 
-    let cleanup = () => {}
+    let cleanup = async () => {}
     try {
       const { data: sessionData } = await supabase.auth.getSession()
       const token = sessionData.session?.access_token
       if (!token) throw new Error('Сессия истекла — обновите страницу и войдите заново.')
       const authH = { Authorization: `Bearer ${token}` }
+
+      if (USE_BACKGROUND_JOBS) {
+        const fd = new FormData()
+        fd.append('file1', file1)
+        fd.append('file2', file2)
+        setStage('Постановка в очередь')
+        const enqueueResp = await fetchWithTimeout('/api/jobs', {
+          method: 'POST', body: fd, headers: authH,
+        })
+        if (!enqueueResp.ok) throw new Error(await responseError(enqueueResp))
+        const queued = await enqueueResp.json()
+        let status
+        for (;;) {
+          const statusResp = await fetchWithTimeout(`/api/jobs/${encodeURIComponent(queued.id)}`, {
+            headers: authH,
+          })
+          if (!statusResp.ok) throw new Error(await responseError(statusResp))
+          status = await statusResp.json()
+          setStage({
+            queued: 'В очереди', opening: 'Открытие PDF', mapping: 'Сопоставление страниц',
+            comparing: 'Сравнение', done: 'Готово',
+          }[status.stage] || 'Обработка')
+          setProgress({ done: status.done || 0, total: status.total || 0 })
+          if (status.state === 'succeeded') break
+          if (status.state === 'failed') throw new Error(status.error || 'Фоновая обработка завершилась ошибкой')
+          await new Promise((resolve) => setTimeout(resolve, 1000))
+        }
+        const [buf1, buf2] = await Promise.all([file1.arrayBuffer(), file2.arrayBuffer()])
+        const [doc1, doc2] = await Promise.all([
+          pdfjsLib.getDocument({ data: buf1 }).promise,
+          pdfjsLib.getDocument({ data: buf2 }).promise,
+        ])
+        setDocs({ doc1, doc2 })
+        setResult(status.result)
+        setProgress({ done: status.result.totalPairs, total: status.result.totalPairs })
+        return
+      }
 
       //транспорт: мелкие файлы ходят в API напрямую, крупные — через хранилище
       let transport
@@ -558,17 +618,20 @@ function Workspace({ user }) {
           return fd
         }
         transport = {
-          plan: () => fetch('/api/plan', { method: 'POST', body: formData(), headers: authH }),
-          batch: (pairs) => fetch('/api/compare-batch', {
+          plan: () => fetchWithTimeout('/api/plan', { method: 'POST', body: formData(), headers: authH }),
+          batch: (pairs) => fetchWithTimeout('/api/compare-batch', {
             method: 'POST', body: formData(JSON.stringify(pairs)), headers: authH,
           }),
         }
       } else {
         setStage('Загрузка файлов в хранилище')
-        const jobId = crypto.randomUUID()
+        const jobId = newSessionId()
         const path1 = `${user.id}/${jobId}/1.pdf`
         const path2 = `${user.id}/${jobId}/2.pdf`
-        cleanup = () => supabase.storage.from('uploads').remove([path1, path2]).then(() => {}, () => {})
+        cleanup = async () => {
+          const { error } = await supabase.storage.from('uploads').remove([path1, path2])
+          if (error) console.warn('Не удалось очистить временные файлы', error)
+        }
         const opts = { contentType: 'application/pdf' }
         const [up1, up2] = await Promise.all([
           supabase.storage.from('uploads').upload(path1, file1, opts),
@@ -585,10 +648,10 @@ function Workspace({ user }) {
         const urls = { url1: s1.data.signedUrl, url2: s2.data.signedUrl }
         const jsonH = { ...authH, 'Content-Type': 'application/json' }
         transport = {
-          plan: () => fetch('/api/plan-urls', {
+          plan: () => fetchWithTimeout('/api/plan-urls', {
             method: 'POST', headers: jsonH, body: JSON.stringify(urls),
           }),
-          batch: (pairs) => fetch('/api/compare-batch-urls', {
+          batch: (pairs) => fetchWithTimeout('/api/compare-batch-urls', {
             method: 'POST', headers: jsonH, body: JSON.stringify({ ...urls, pairs }),
           }),
         }
@@ -636,13 +699,15 @@ function Workspace({ user }) {
       }
       setResult((prev) => prev && ({ ...prev, elapsed: Math.round((performance.now() - t0) / 100) / 10 }))
     } catch (err) {
-      if (err instanceof TypeError) {
+      if (err?.name === 'AbortError') {
+        setError('Сервер не ответил вовремя. Уменьшите размер PDF или попробуйте ещё раз.')
+      } else if (err instanceof TypeError) {
         setError('Не удалось связаться с сервером. Проверьте соединение и попробуйте ещё раз.')
       } else {
         setError(String(err.message || err))
       }
     } finally {
-      cleanup()
+      await cleanup()
       setBusy(false)
     }
   }

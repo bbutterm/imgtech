@@ -23,6 +23,9 @@ import fitz
 from fastapi import FastAPI, File, Form, Header, UploadFile
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from starlette.concurrency import run_in_threadpool
+
+from api.job_queue import get_job, new_job, public_job
 
 try:
 	from api.vector_compare import compare_page_vectors  #локальный запуск
@@ -35,6 +38,8 @@ app = FastAPI()
 
 #лимит на скачивание одного файла из хранилища
 MAX_DOWNLOAD = 60 * 1024 * 1024
+#лимит файла для background job upload
+MAX_JOB_FILE = 50 * 1024 * 1024
 
 #выше этой доли несовпавших точек страница считается «сильно изменённой»:
 #рамки по ней — шум, а не информация, и не возвращаются
@@ -61,6 +66,16 @@ def _check_auth(authorization):
 		return JSONResponse({"error": "Сессия недействительна — войдите заново"},
 		                    status_code=401)
 	return None
+
+
+async def _auth_user(authorization):
+	"""Проверяет bearer и возвращает user, не блокируя event loop."""
+	if not authorization.startswith("Bearer "):
+		return None
+	try:
+		return await run_in_threadpool(verify_token, authorization[7:])
+	except Exception:
+		return None
 
 
 def _fetch_from_storage(url):
@@ -110,6 +125,16 @@ def _inside(text_box, graphics_boxes, min_overlap=0.5):
 	return False
 
 
+def _non_text_similarity(page1, page2):
+	"""Оценивает похожесть графических страниц без текстового слоя."""
+	count1 = len(page1.get_cdrawings())
+	count2 = len(page2.get_cdrawings())
+	count_score = min(count1, count2) / max(count1, count2, 1)
+	width_score = min(page1.rect.width, page2.rect.width) / max(page1.rect.width, page2.rect.width, 1)
+	height_score = min(page1.rect.height, page2.rect.height) / max(page1.rect.height, page2.rect.height, 1)
+	return 0.6 * count_score + 0.2 * width_score + 0.2 * height_score
+
+
 def build_plan(doc1, doc2):
 	"""Сопоставляет страницы документов по текстовому содержимому.
 
@@ -125,6 +150,16 @@ def build_plan(doc1, doc2):
 		lo = max(0, i - MATCH_BAND)
 		hi = min(len(words2), i + MATCH_BAND + 1)
 		for j in range(lo, hi):
+			#У графических листов часто нет текстового слоя. В этом случае
+			#сопоставляем по числу примитивов и размерам страницы, а не по
+			#пустым спискам слов, которые давали случайные пары.
+			if not words1[i] or not words2[j]:
+				if words1[i] or words2[j]:
+					continue
+				ratio = _non_text_similarity(doc1[i], doc2[j])
+				if ratio >= MATCH_MIN_SIM:
+					candidates.append((ratio, i, j))
+				continue
 			sm = dl.SequenceMatcher(None, words1[i], words2[j])
 			if sm.quick_ratio() < MATCH_MIN_SIM:
 				continue
@@ -202,6 +237,29 @@ def _cap_boxes(boxes1, boxes2, tb1, tb2, limit):
 	return kept[0], kept[1], kept[2], kept[3], True
 
 
+def _empty_compare_pages(doc1, doc2, pairs):
+	"""Возвращает результат для заведомо идентичных страниц без vector diff."""
+	pages = []
+	for i, j in pairs:
+		if not (0 <= i < doc1.page_count and 0 <= j < doc2.page_count):
+			continue
+		p1, p2 = doc1[i], doc2[j]
+		pages.append({
+			"index1": i,
+			"index2": j,
+			"boxes1": [],
+			"boxes2": [],
+			"textBoxes1": [],
+			"textBoxes2": [],
+			"width1": p1.rect.width, "height1": p1.rect.height,
+			"width2": p2.rect.width, "height2": p2.rect.height,
+			"unmatchedShare": 0.0,
+			"heavilyChanged": False,
+			"truncated": False,
+		})
+	return pages
+
+
 def compare_pairs(doc1, doc2, pairs):
 	"""Сравнивает заданные пары страниц, ограничивая объём выдачи."""
 	pages = []
@@ -267,7 +325,50 @@ def _parse_pairs(raw):
 	pairs = json.loads(raw) if isinstance(raw, str) else raw
 	if not isinstance(pairs, list) or len(pairs) > MAX_BATCH:
 		raise ValueError("недопустимый список пар")
-	return [(int(p[0]), int(p[1])) for p in pairs]
+	parsed = []
+	for pair in pairs:
+		if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+			raise ValueError("каждая пара должна содержать два индекса")
+		try:
+			i, j = int(pair[0]), int(pair[1])
+		except (TypeError, ValueError):
+			raise ValueError("индексы страниц должны быть целыми")
+		if i < 0 or j < 0:
+			raise ValueError("индексы страниц не могут быть отрицательными")
+		parsed.append((i, j))
+	return parsed
+
+
+@app.post("/api/jobs", status_code=202)
+async def create_job(file1: UploadFile = File(...), file2: UploadFile = File(...),
+                     authorization: str = Header(default="")):
+	user = await _auth_user(authorization)
+	if not user or not user.get("id"):
+		return JSONResponse({"error": "Сессия недействительна — войдите заново"},
+		                    status_code=401)
+	data1 = await file1.read(MAX_JOB_FILE + 1)
+	data2 = await file2.read(MAX_JOB_FILE + 1)
+	if len(data1) > MAX_JOB_FILE or len(data2) > MAX_JOB_FILE:
+		return JSONResponse({"error": "Файл слишком большой (максимум 50 МБ)"},
+		                    status_code=413)
+	try:
+		job_id = await run_in_threadpool(new_job, user["id"], data1, data2)
+	except Exception:
+		return JSONResponse({"error": "Не удалось поставить сравнение в очередь"},
+		                    status_code=500)
+	return {"id": job_id, "state": "pending", "stage": "queued", "done": 0, "total": 0}
+
+
+@app.get("/api/jobs/{job_id}")
+async def job_status(job_id: str, authorization: str = Header(default="")):
+	user = await _auth_user(authorization)
+	if not user or not user.get("id"):
+		return JSONResponse({"error": "Сессия недействительна — войдите заново"},
+		                    status_code=401)
+	row = await run_in_threadpool(get_job, job_id, user["id"])
+	if not row:
+		return JSONResponse({"error": "Задание не найдено"}, status_code=404)
+	return public_job(row)
 
 
 @app.post("/api/plan")
@@ -280,7 +381,7 @@ async def plan(file1: UploadFile = File(...), file2: UploadFile = File(...),
 	if doc1 is None:
 		return JSONResponse({"error": "Не удалось открыть один из файлов как PDF"},
 		                    status_code=400)
-	return build_plan(doc1, doc2)
+	return await run_in_threadpool(build_plan, doc1, doc2)
 
 
 @app.post("/api/plan-urls")
@@ -300,7 +401,7 @@ async def plan_urls(payload: UrlsIn, authorization: str = Header(default="")):
 	if doc1 is None:
 		return JSONResponse({"error": "Не удалось открыть один из файлов как PDF"},
 		                    status_code=400)
-	return build_plan(doc1, doc2)
+	return await run_in_threadpool(build_plan, doc1, doc2)
 
 
 @app.post("/api/compare-batch")
@@ -314,12 +415,16 @@ async def compare_batch(file1: UploadFile = File(...), file2: UploadFile = File(
 		pair_list = _parse_pairs(pairs)
 	except Exception:
 		return JSONResponse({"error": "Недопустимый список пар"}, status_code=400)
-	doc1, doc2 = _open_pdfs(await file1.read(), await file2.read())
+	data1 = await file1.read()
+	data2 = await file2.read()
+	doc1, doc2 = _open_pdfs(data1, data2)
 	if doc1 is None:
 		return JSONResponse({"error": "Не удалось открыть один из файлов как PDF"},
 		                    status_code=400)
 	started = time.time()
-	pages = compare_pairs(doc1, doc2, pair_list)
+	pages = (_empty_compare_pages(doc1, doc2, pair_list)
+	         if data1 == data2 else
+	         await run_in_threadpool(compare_pairs, doc1, doc2, pair_list))
 	return {"pages": pages, "elapsed": round(time.time() - started, 2)}
 
 
@@ -346,5 +451,7 @@ async def compare_batch_urls(payload: BatchUrlsIn,
 		return JSONResponse({"error": "Не удалось открыть один из файлов как PDF"},
 		                    status_code=400)
 	started = time.time()
-	pages = compare_pairs(doc1, doc2, pair_list)
+	pages = (_empty_compare_pages(doc1, doc2, pair_list)
+	         if data1 == data2 else
+	         await run_in_threadpool(compare_pairs, doc1, doc2, pair_list))
 	return {"pages": pages, "elapsed": round(time.time() - started, 2)}
