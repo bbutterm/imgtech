@@ -274,19 +274,34 @@ function PagePair({ page, docs, focus, activeId, renderW, reviews, setReview }) 
     ? `Страница ${page.index1 + 1}`
     : `Страницы ${page.index1 + 1} ↔ ${page.index2 + 1}`
 
-  const showPair = total > 0 || page.heavilyChanged
+  //листы, которые не удалось совместить, — отдельное состояние: показывать
+  //по ним «вот отличия» нельзя, это шум, а не результат сравнения
+  const uncomparable = page.comparable === false
+  const showPair = total > 0 || page.heavilyChanged || uncomparable
   const estHeight = VIEW_W * (page.height1 / page.width1) + 40
+  const angle = page.registeredAngle || 0
 
   return (
     <section className={`page-pair${approved ? ' approved-page' : ''}`} ref={secRef}>
       <h3>
         {title}
-        {total === 0 && !page.heavilyChanged &&
+        {uncomparable && (
+          <span className="badge badge-stop">
+            не удалось сопоставить листы — проверьте вручную
+          </span>
+        )}
+        {!uncomparable && total === 0 && !page.heavilyChanged &&
           <span className="badge badge-ok">отличий не найдено</span>}
-        {total > 0 && <span className="badge badge-diff">{total} отличий</span>}
-        {page.heavilyChanged && (
+        {!uncomparable && total > 0 &&
+          <span className="badge badge-diff">{total} отличий</span>}
+        {!uncomparable && page.heavilyChanged && (
           <span className="badge badge-warn">
             страница сильно изменена — показаны зоны изменений
+          </span>
+        )}
+        {Math.abs(angle) >= 0.05 && (
+          <span className="badge badge-info">
+            листы совмещены с поворотом {angle.toFixed(2)}°
           </span>
         )}
         {page.truncated && (
@@ -484,9 +499,12 @@ function Workspace({ user }) {
   const graphicsCount = diffs.filter((d) => d.type === 'графика').length
   const textCount = diffs.length - graphicsCount
   const heavyCount = result ? result.pages.filter((p) => p.heavilyChanged).length : 0
+  const uncomparableCount = result
+    ? result.pages.filter((p) => p.comparable === false).length : 0
   const removedCount = result?.removed?.length || 0
   const addedCount = result?.added?.length || 0
-  const totalIssues = diffs.length + removedCount + addedCount + heavyCount
+  const totalIssues = diffs.length + removedCount + addedCount + heavyCount +
+                      uncomparableCount
   const renderW = (result?.totalPairs || 0) > 8 ? 1600 : 2800
 
   //позиции согласования: лист с отличиями (не каждое отличие!) и
@@ -497,14 +515,17 @@ function Workspace({ user }) {
     for (const p of result.pages) {
       const total = p.boxes1.length + p.boxes2.length +
                     p.textBoxes1.length + p.textBoxes2.length
-      if (total === 0 && !p.heavilyChanged) continue
+      const uncomparable = p.comparable === false
+      if (total === 0 && !p.heavilyChanged && !uncomparable) continue
       items.push({
         id: pairKeyOf(p),
         sort: p.index1,
         page: p.index1 === p.index2
           ? `${p.index1 + 1}`
           : `${p.index1 + 1} ↔ ${p.index2 + 1}`,
-        type: p.heavilyChanged ? 'сильно изменена' : `отличий: ${total}`,
+        type: uncomparable
+          ? 'не удалось сопоставить — проверить вручную'
+          : (p.heavilyChanged ? 'сильно изменена' : `отличий: ${total}`),
       })
     }
     for (const i of result.removed || []) {
@@ -743,6 +764,8 @@ function Workspace({ user }) {
                     {removedCount > 0 && ` · листов удалено: ${removedCount}`}
                     {addedCount > 0 && ` · листов добавлено: ${addedCount}`}
                     {heavyCount > 0 && ` · сильно изменённых страниц: ${heavyCount}`}
+                    {uncomparableCount > 0 &&
+                      ` · не удалось сопоставить листов: ${uncomparableCount}`}
                   </strong>
                 )}
               <span className="summary-meta">

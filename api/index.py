@@ -45,6 +45,12 @@ MAX_JOB_FILE = 50 * 1024 * 1024
 #рамки по ней — шум, а не информация, и не возвращаются
 HEAVY_SHARE = 0.5
 
+#выше этой доли листы вообще не удалось сопоставить: так выглядят скан против
+#вектора, разный масштаб листа или полностью перечерченный лист. Показывать
+#это как «вот ваши отличия» нельзя — пользователь пойдёт проверять шум,
+#поэтому пара помечается как несравнимая и требует ручной проверки
+UNCOMPARABLE_SHARE = 0.6
+
 #потолок числа рамок на пару страниц; сверх него оставляем самые крупные
 MAX_BOXES_PER_PAGE = 100
 
@@ -111,6 +117,24 @@ def text_diff_boxes(page1, page2):
 	boxes1 = [list(words1[i][:4]) for i, d in enumerate(diff1) if d.startswith("-")]
 	boxes2 = [list(words2[i][:4]) for i, d in enumerate(diff2) if d.startswith("+")]
 	return boxes1, boxes2
+
+
+def _to_page_coords(boxes, page):
+	"""Переводит рамки в систему координат отображаемой страницы.
+
+	get_cdrawings и get_text отдают координаты БЕЗ учёта поворота страницы
+	(/Rotate), а page.rect — уже с учётом: именно его размеры уходят клиенту
+	и по ним pdf.js рисует страницу. Без этого перевода на повёрнутом листе
+	рамки лягут мимо отличий, а часть уедет за край.
+	"""
+	if not page.rotation or not boxes:
+		return boxes
+	m = page.rotation_matrix
+	out = []
+	for x0, y0, x1, y1 in boxes:
+		r = fitz.Rect(x0, y0, x1, y1) * m
+		out.append([r.x0, r.y0, r.x1, r.y1])
+	return out
 
 
 def _inside(text_box, graphics_boxes, min_overlap=0.5):
@@ -255,6 +279,8 @@ def _empty_compare_pages(doc1, doc2, pairs):
 			"width2": p2.rect.width, "height2": p2.rect.height,
 			"unmatchedShare": 0.0,
 			"heavilyChanged": False,
+			"comparable": True,
+			"registeredAngle": 0.0,
 			"truncated": False,
 		})
 	return pages
@@ -269,6 +295,7 @@ def compare_pairs(doc1, doc2, pairs):
 		p1, p2 = doc1[i], doc2[j]
 		r = compare_page_vectors(p1, p2)
 		heavy = r["unmatched_share"] > HEAVY_SHARE
+		comparable = r["unmatched_share"] <= UNCOMPARABLE_SHARE
 
 		truncated = False
 		if heavy:
@@ -297,14 +324,18 @@ def compare_pairs(doc1, doc2, pairs):
 		pages.append({
 			"index1": i,
 			"index2": j,
-			"boxes1": boxes1,
-			"boxes2": boxes2,
-			"textBoxes1": tb1,
-			"textBoxes2": tb2,
+			"boxes1": _to_page_coords(boxes1, p1),
+			"boxes2": _to_page_coords(boxes2, p2),
+			"textBoxes1": _to_page_coords(tb1, p1),
+			"textBoxes2": _to_page_coords(tb2, p2),
 			"width1": p1.rect.width, "height1": p1.rect.height,
 			"width2": p2.rect.width, "height2": p2.rect.height,
 			"unmatchedShare": round(r["unmatched_share"], 4),
 			"heavilyChanged": heavy,
+			"comparable": comparable,
+			#поворот, которым листы пришлось совмещать: показывается в UI,
+			#чтобы «отличий нет» на перевёрнутом листе не выглядело ошибкой
+			"registeredAngle": round(r.get("angle", 0.0), 2),
 			"truncated": truncated,
 		})
 	return pages

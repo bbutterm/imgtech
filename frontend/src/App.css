@@ -312,6 +312,10 @@ button:disabled { opacity: 0.55; cursor: not-allowed; }
 .badge-ok { background: rgba(46, 125, 50, 0.15); color: #2e7d32; }
 .badge-diff { background: rgba(198, 40, 40, 0.15); color: #c62828; }
 .badge-warn { background: rgba(230, 145, 0, 0.15); color: #b26a00; }
+/* листы не совместились: это не «вот отличия», а требование проверить руками */
+.badge-stop { background: #b71c1c; color: #fff; }
+/* пояснение к автоматическому совмещению (поворот листа) */
+.badge-info { background: rgba(21, 101, 192, 0.15); color: #1565c0; }
 
 .pair-row {
   display: flex;
