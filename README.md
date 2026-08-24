@@ -26,9 +26,12 @@ Vercel serverless (Python, FastAPI)  ── проверка токена ──
 ядро сравнения (numpy + PyMuPDF), файл core/vector_compare.py
 ```
 
-Серверного состояния нет: файлы живут в Storage только на время сравнения
-(клиент удаляет их в `finally`), результаты и отметки согласования —
-в памяти вкладки.
+Сравнения сохраняются: запись, результат и отметки согласования лежат в
+Postgres (`comparisons`, `sheet_reviews`), исходные PDF — в Storage со
+сроком хранения `FILE_TTL_DAYS` (90 дней). После истечения срока файлы
+удаляются, а запись остаётся журналом: сводка, статусы и выгрузка отчёта
+без просмотра разворотов. Пишет прямо браузер — доступ ограничен RLS,
+отдельный серверный эндпоинт для этого не нужен.
 
 ## Карта репозитория
 
@@ -43,6 +46,10 @@ Vercel serverless (Python, FastAPI)  ── проверка токена ──
 | `frontend/src/App.jsx` | Почти весь UI одним файлом (кандидат на разбиение) |
 | `frontend/src/report.js` | Генерация DOCX-отчёта (пакет `docx`, динамический импорт) |
 | `frontend/src/supabase.js` | Клиент Supabase (URL и publishable-ключ — публичные) |
+| `frontend/src/comparisons.js` | История сравнений и отметки: запись, чтение, срок хранения |
+| `frontend/src/comparisons.test.js` | Тесты слоя хранения: `cd frontend && npm test` |
+| `frontend/tests/ui-smoke.mjs` | Прогон интерфейса в браузере с подменой Supabase: `npm run test:ui` |
+| `supabase/migrations/` | SQL-миграции схемы |
 | `requirements.txt` | Зависимости serverless-функции (Vercel ставит из корня) |
 | `vercel.json` | Сборка фронта, python-функция, rewrites `/api/*`, регион `pdx1` |
 | `.python-version` | Пин Python 3.12 для сборки Vercel (иначе билдер берёт свежий Python без готовых wheel'ов и компилирует numpy из исходников) |
@@ -176,10 +183,12 @@ Auth/сессии: `supabase.auth.signInWithPassword`, регистрация в
   `maxDuration 60`, регион `pdx1` (рядом с бакетом us-west-2).
   Лимит тела запроса ~4.5 МБ на всех тарифах — потому и Storage-путь.
 - **Supabase** (проект `ajltzwomvyvntvtjnrrf`, us-west-2): Auth
-  (email/пароль), Postgres (`sessions` + RLS «только своя строка»,
-  realtime-публикация), Storage (bucket `uploads`, приватный, RLS
-  «папка = свой uid», лимит 50 МБ/файл).
-- Схема накатана миграцией `sessions_and_uploads` (см. Supabase migrations).
+  (email/пароль), Postgres (`sessions`, `comparisons`, `sheet_reviews` —
+  все с RLS «только свои строки», у `sessions` ещё realtime-публикация),
+  Storage (bucket `uploads`, приватный, RLS «папка = свой uid», лимит
+  50 МБ/файл; путь файла сравнения — `{uid}/{comparison_id}/{1,2}.pdf`).
+- Схема накатана миграциями `sessions_and_uploads` и
+  `comparisons_and_reviews` (SQL — в `supabase/migrations/`).
 - **Ветки**: `main` — прод; `dev` — разработка; `release/v0.1-demo` —
   замороженная точка отката (ветка-закладка: пуш git-тегов из CI-сессии
   был заблокирован).
@@ -193,6 +202,9 @@ cd frontend && npm install && npm run dev  # UI на :5173, /api → :8000
 
 python3 -m core.tests.run_tests            # тесты ядра (13 проверок)
 python3 -m unittest discover -s core/tests -p "test_*.py"   # остальные (21)
+cd frontend && npm test                    # тесты слоя хранения (14)
+cd frontend && npm run build && npm run preview -- --port 4173 &
+cd frontend && npm run test:ui             # прогон интерфейса в браузере
 ```
 
 Тестирование API без доступа к Supabase (проверка токена — сетевая):
@@ -217,7 +229,8 @@ python3 -m unittest discover -s core/tests -p "test_*.py"   # остальные
    `MAX_BOXES_PER_PAGE=100`, склейка 15/12/40 pt, `MATCH_MIN_SIM=0.5`,
    `MATCH_BAND=10`, регистрация: `_SEED_ANGLES` (±3° шагом 0.5 + 90/180/270),
    `_SEED_TRIALS=4`, `_START_TRIALS=2`, `_ANGLE_GAIN=1.05`, `_ALIGNED_SHARE=0.9`,
-   фронт: `DIRECT_LIMIT_MB=3.5`, `MAX_FILE_MB=50`, `BATCH_SIZE=6`.
+   фронт: `DIRECT_LIMIT_MB=3.5`, `MAX_FILE_MB=50`, `BATCH_SIZE=6`,
+   `FILE_TTL_DAYS=90` (срок хранения исходных PDF).
 5. Ключи в `frontend/src/supabase.js` и `api/supabase_auth.py` — публичные
    (anon/publishable), это нормально. Секретов в репозитории нет и не должно
    появиться.
@@ -236,8 +249,11 @@ python3 -m unittest discover -s core/tests -p "test_*.py"   # остальные
 - Сканы (растровые PDF) не сравниваются — помечаются `heavilyChanged`;
   растровый fallback (SSIM) в бэклоге.
 - Атрибуты линий (цвет/толщина) не сравниваются.
-- Отметки согласования не сохраняются между сессиями (нужна таблица в
-  Supabase Postgres — «история сравнений»).
+- Сравнение видит только его владелец: команд, ролей и передачи листа
+  коллеге на согласование пока нет (`comparisons.org_id` заведён под это,
+  но не используется).
+- Просроченные файлы убираются лениво, при открытии списка истории:
+  планировщика (pg_cron) в проекте нет.
 - При глубоком зуме канвас мылится (фикс — динамический ре-рендер видимой
   области под текущий масштаб).
 - `VIEW_W` вычисляется один раз при загрузке — поворот телефона не

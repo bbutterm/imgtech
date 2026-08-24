@@ -2,6 +2,11 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import * as pdfjsLib from 'pdfjs-dist'
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
 import { supabase } from './supabase'
+import {
+  attachFiles, createComparison, deleteComparison, failComparison,
+  filesAvailable, finishComparison, listComparisons, loadComparison,
+  FILE_TTL_DAYS, loadReviews, purgeExpired, reviewSheets, saveReview, signedUrls,
+} from './comparisons'
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl
 
@@ -448,6 +453,60 @@ function Login({ notice }) {
   )
 }
 
+const dateLabel = (iso) => new Date(iso).toLocaleString('ru-RU',
+  { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })
+
+function HistoryList({ rows, busy, activeId, onOpen, onDelete }) {
+  if (busy) return <div className="history"><div className="history-empty">Загрузка истории…</div></div>
+  if (!rows.length) {
+    return (
+      <div className="history">
+        <h3>Мои сравнения</h3>
+        <div className="history-empty">
+          Пока пусто. Результат первого сравнения сохранится сюда автоматически.
+        </div>
+      </div>
+    )
+  }
+  return (
+    <div className="history">
+      <h3>Мои сравнения</h3>
+      <ul className="history-list">
+        {rows.map((row) => {
+          const s = row.summary || {}
+          const openable = row.state === 'done'
+          const expired = openable && !filesAvailable(row)
+          return (
+            <li key={row.id} className={row.id === activeId ? 'history-item active' : 'history-item'}>
+              <div className="history-main">
+                <div className="history-files">{row.file1_name} ↔ {row.file2_name}</div>
+                <div className="history-meta">
+                  {dateLabel(row.created_at)}
+                  {row.state === 'done' && ` · листов с изменениями: ${s.sheets ?? 0}`}
+                  {row.state === 'done' && ` · согласовано: ${row.approvedCount}`}
+                  {row.state === 'running' && ' · не завершено'}
+                  {row.state === 'failed' && ` · ошибка: ${row.error || 'не удалось сравнить'}`}
+                  {expired && ' · файлы удалены по сроку хранения, доступен только отчёт'}
+                </div>
+              </div>
+              <div className="history-actions">
+                {openable && (
+                  <button type="button" onClick={() => onOpen(row)}>
+                    {expired ? 'Отчёт' : 'Открыть'}
+                  </button>
+                )}
+                <button type="button" className="link-danger" onClick={() => onDelete(row)}>
+                  Удалить
+                </button>
+              </div>
+            </li>
+          )
+        })}
+      </ul>
+    </div>
+  )
+}
+
 function Workspace({ user }) {
   const [file1, setFile1] = useState(null)
   const [file2, setFile2] = useState(null)
@@ -461,9 +520,46 @@ function Workspace({ user }) {
   const [cur, setCur] = useState(0)
   const [focus, setFocus] = useState(null)
   const [reviews, setReviews] = useState({})
+  //текущая запись в истории и её метаданные (имена файлов нужны отчёту и
+  //после перезагрузки, когда объектов File на руках уже нет)
+  const [comparison, setComparison] = useState(null)
+  const [history, setHistory] = useState([])
+  const [historyBusy, setHistoryBusy] = useState(true)
+  const saveTimers = useRef({})
 
-  const setReview = (id, patch) =>
-    setReviews((prev) => ({ ...prev, [id]: { ...prev[id], ...patch } }))
+  const refreshHistory = async () => {
+    setHistoryBusy(true)
+    try {
+      setHistory(await purgeExpired(await listComparisons()))
+    } catch (err) {
+      console.warn('Не удалось загрузить историю сравнений', err)
+    } finally {
+      setHistoryBusy(false)
+    }
+  }
+
+  useEffect(() => { refreshHistory() }, [])
+
+  //отметка согласования: сразу в интерфейсе, в базу — с задержкой, чтобы
+  //набор комментария не превращался в запрос на каждую букву
+  const setReview = (id, patch) => {
+    setReviews((prev) => {
+      const next = { ...prev, [id]: { ...prev[id], ...patch } }
+      const target = comparison?.id
+      if (target) {
+        clearTimeout(saveTimers.current[id])
+        saveTimers.current[id] = setTimeout(() => {
+          saveReview(target, id, next[id], user.id)
+            .then(refreshHistory, (err) => console.warn('Не удалось сохранить отметку', err))
+        }, 600)
+      }
+      return next
+    })
+  }
+
+  useEffect(() => () => {
+    Object.values(saveTimers.current).forEach(clearTimeout)
+  }, [])
 
   useEffect(() => {
     if (!busy) return
@@ -509,40 +605,14 @@ function Workspace({ user }) {
 
   //позиции согласования: лист с отличиями (не каждое отличие!) и
   //удалённые/добавленные листы
-  const reviewItems = useMemo(() => {
-    if (!result) return []
-    const items = []
-    for (const p of result.pages) {
-      const total = p.boxes1.length + p.boxes2.length +
-                    p.textBoxes1.length + p.textBoxes2.length
-      const uncomparable = p.comparable === false
-      if (total === 0 && !p.heavilyChanged && !uncomparable) continue
-      items.push({
-        id: pairKeyOf(p),
-        sort: p.index1,
-        page: p.index1 === p.index2
-          ? `${p.index1 + 1}`
-          : `${p.index1 + 1} ↔ ${p.index2 + 1}`,
-        type: uncomparable
-          ? 'не удалось сопоставить — проверить вручную'
-          : (p.heavilyChanged ? 'сильно изменена' : `отличий: ${total}`),
-      })
+  const reviewItems = useMemo(() => reviewSheets(result).map((it) => {
+    const r = reviews[it.id] || {}
+    return {
+      ...it,
+      status: r.approved ? 'Согласовано' : (r.comment ? 'Есть замечание' : '—'),
+      comment: r.comment || '',
     }
-    for (const i of result.removed || []) {
-      items.push({ id: `removed-${i}`, sort: i, page: `${i + 1} (док. 1)`, type: 'лист удалён' })
-    }
-    for (const j of result.added || []) {
-      items.push({ id: `added-${j}`, sort: j, page: `${j + 1} (док. 2)`, type: 'лист добавлен' })
-    }
-    return items.sort((a, b) => a.sort - b.sort).map((it) => {
-      const r = reviews[it.id] || {}
-      return {
-        ...it,
-        status: r.approved ? 'Согласовано' : (r.comment ? 'Есть замечание' : '—'),
-        comment: r.comment || '',
-      }
-    })
-  }, [result, reviews])
+  }), [result, reviews])
 
   const approvedCount = reviewItems.filter((it) => it.status === 'Согласовано').length
   const commentedCount = reviewItems.filter((it) => it.status === 'Есть замечание').length
@@ -550,8 +620,8 @@ function Workspace({ user }) {
   async function exportReport() {
     const { downloadReport } = await import('./report.js')
     await downloadReport({
-      file1: file1?.name || 'документ 1',
-      file2: file2?.name || 'документ 2',
+      file1: file1?.name || comparison?.file1_name || 'документ 1',
+      file2: file2?.name || comparison?.file2_name || 'документ 2',
       date: new Date().toISOString().slice(0, 10),
       total: reviewItems.length,
       approved: approvedCount,
@@ -565,6 +635,60 @@ function Workspace({ user }) {
     setCur(i)
     const d = diffs[i]
     setFocus({ pairKey: d.pairKey, box: d.box, seq: Date.now() })
+  }
+
+  //открытие сохранённого сравнения: результат берём из базы, PDF —
+  //из хранилища. Если срок хранения файлов истёк, показываем журнал:
+  //сводку, статусы и выгрузку отчёта без разворотов
+  async function openSaved(row) {
+    setBusy(true)
+    setError('')
+    setStage('Загрузка сохранённого сравнения')
+    setResult(null)
+    setDocs(null)
+    setFocus(null)
+    setCur(0)
+    try {
+      const full = await loadComparison(row.id)
+      if (full.state !== 'done' || !full.result) {
+        throw new Error(full.error || 'Это сравнение не было завершено')
+      }
+      setComparison(full)
+      setReviews(await loadReviews(full.id))
+      setFile1(null)
+      setFile2(null)
+      setResult(full.result)
+      if (filesAvailable(full)) {
+        const urls = await signedUrls(full)
+        const buffers = await Promise.all(urls.map(async (url) => {
+          const resp = await fetch(url)
+          if (!resp.ok) throw new Error('Не удалось скачать файлы сравнения')
+          return resp.arrayBuffer()
+        }))
+        const [doc1, doc2] = await Promise.all(
+          buffers.map((data) => pdfjsLib.getDocument({ data }).promise))
+        setDocs({ doc1, doc2 })
+      }
+    } catch (err) {
+      setError(String(err.message || err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function removeSaved(row) {
+    if (!window.confirm(`Удалить сравнение «${row.file1_name}» ↔ «${row.file2_name}»?`)) return
+    try {
+      await deleteComparison(row)
+      if (comparison?.id === row.id) {
+        setComparison(null)
+        setResult(null)
+        setDocs(null)
+      }
+      refreshHistory()
+    } catch (err) {
+      setError(`Не удалось удалить сравнение: ${err.message || err}`)
+    }
   }
 
   async function handleCompare(e) {
@@ -581,15 +705,37 @@ function Workspace({ user }) {
     setFocus(null)
     setCur(0)
     setReviews({})
+    setComparison(null)
     setProgress({ done: 0, total: 0 })
     setStage('Подготовка файлов')
 
-    let cleanup = async () => {}
+    let record = null
     try {
       const { data: sessionData } = await supabase.auth.getSession()
       const token = sessionData.session?.access_token
       if (!token) throw new Error('Сессия истекла — обновите страницу и войдите заново.')
       const authH = { Authorization: `Bearer ${token}` }
+
+      //запись в истории заводится до сравнения: если что-то отвалится,
+      //пользователь увидит в списке неудачную попытку, а не пустоту
+      record = await createComparison(user.id, file1, file2)
+      setComparison(record)
+
+      //файлы кладём в хранилище всегда, а не только когда они не влезают в
+      //тело запроса: без них сохранённое сравнение потом нечем показать
+      setStage('Загрузка файлов в хранилище')
+      const path1 = `${user.id}/${record.id}/1.pdf`
+      const path2 = `${user.id}/${record.id}/2.pdf`
+      const opts = { contentType: 'application/pdf', upsert: true }
+      const [up1, up2] = await Promise.all([
+        supabase.storage.from('uploads').upload(path1, file1, opts),
+        supabase.storage.from('uploads').upload(path2, file2, opts),
+      ])
+      if (up1.error || up2.error) {
+        throw new Error(`Не удалось загрузить файлы: ${(up1.error || up2.error).message}`)
+      }
+      record = await attachFiles(record.id, path1, path2)
+      setComparison(record)
 
       if (USE_BACKGROUND_JOBS) {
         const fd = new FormData()
@@ -625,10 +771,12 @@ function Workspace({ user }) {
         setDocs({ doc1, doc2 })
         setResult(status.result)
         setProgress({ done: status.result.totalPairs, total: status.result.totalPairs })
+        setComparison(await finishComparison(record.id, status.result))
+        refreshHistory()
         return
       }
 
-      //транспорт: мелкие файлы ходят в API напрямую, крупные — через хранилище
+      //транспорт: мелкие файлы ходят в API напрямую, крупные — по ссылкам
       let transport
       if (file1.size + file2.size < DIRECT_LIMIT_MB * 1024 * 1024) {
         const formData = (extra) => {
@@ -645,28 +793,8 @@ function Workspace({ user }) {
           }),
         }
       } else {
-        setStage('Загрузка файлов в хранилище')
-        const jobId = newSessionId()
-        const path1 = `${user.id}/${jobId}/1.pdf`
-        const path2 = `${user.id}/${jobId}/2.pdf`
-        cleanup = async () => {
-          const { error } = await supabase.storage.from('uploads').remove([path1, path2])
-          if (error) console.warn('Не удалось очистить временные файлы', error)
-        }
-        const opts = { contentType: 'application/pdf' }
-        const [up1, up2] = await Promise.all([
-          supabase.storage.from('uploads').upload(path1, file1, opts),
-          supabase.storage.from('uploads').upload(path2, file2, opts),
-        ])
-        if (up1.error || up2.error) {
-          throw new Error(`Не удалось загрузить файлы: ${(up1.error || up2.error).message}`)
-        }
-        const [s1, s2] = await Promise.all([
-          supabase.storage.from('uploads').createSignedUrl(path1, 3600),
-          supabase.storage.from('uploads').createSignedUrl(path2, 3600),
-        ])
-        if (s1.error || s2.error) throw new Error('Не удалось подготовить файлы к сравнению')
-        const urls = { url1: s1.data.signedUrl, url2: s2.data.signedUrl }
+        const [url1, url2] = await signedUrls(record)
+        const urls = { url1, url2 }
         const jsonH = { ...authH, 'Content-Type': 'application/json' }
         transport = {
           plan: () => fetchWithTimeout('/api/plan-urls', {
@@ -710,25 +838,47 @@ function Workspace({ user }) {
       setStage('Сравнение')
 
       const t0 = performance.now()
+      //страницы копим и локально: состояние React обновляется асинхронно,
+      //а записать в историю нужно полный результат
+      const collected = []
       for (let k = 0; k < plan.pairs.length; k += BATCH_SIZE) {
         const chunk = plan.pairs.slice(k, k + BATCH_SIZE)
         const resp = await transport.batch(chunk)
         if (!resp.ok) throw new Error(await fail(resp))
         const data = await resp.json()
+        collected.push(...data.pages)
         setResult((prev) => prev && ({ ...prev, pages: [...prev.pages, ...data.pages] }))
         setProgress({ done: Math.min(k + chunk.length, plan.pairs.length), total: plan.pairs.length })
       }
-      setResult((prev) => prev && ({ ...prev, elapsed: Math.round((performance.now() - t0) / 100) / 10 }))
+      const finished = {
+        pages: collected,
+        removed: plan.removed,
+        added: plan.added,
+        numPages1: plan.numPages1,
+        numPages2: plan.numPages2,
+        totalPairs: plan.pairs.length,
+        elapsed: Math.round((performance.now() - t0) / 100) / 10,
+      }
+      setResult(finished)
+      //результат сохраняем целиком: комплект из 50 листов — около 23 КБ
+      setComparison(await finishComparison(record.id, finished))
+      refreshHistory()
     } catch (err) {
+      let message
       if (err?.name === 'AbortError') {
-        setError('Сервер не ответил вовремя. Уменьшите размер PDF или попробуйте ещё раз.')
+        message = 'Сервер не ответил вовремя. Уменьшите размер PDF или попробуйте ещё раз.'
       } else if (err instanceof TypeError) {
-        setError('Не удалось связаться с сервером. Проверьте соединение и попробуйте ещё раз.')
+        message = 'Не удалось связаться с сервером. Проверьте соединение и попробуйте ещё раз.'
       } else {
-        setError(String(err.message || err))
+        message = String(err.message || err)
+      }
+      setError(message)
+      if (record) {
+        //неудачную попытку тоже видно в истории — вместе с причиной
+        await failComparison(record.id, message).catch(() => {})
+        refreshHistory()
       }
     } finally {
-      await cleanup()
       setBusy(false)
     }
   }
@@ -753,7 +903,10 @@ function Workspace({ user }) {
         {busy && <Progress stage={stage} done={progress.done} total={progress.total} elapsed={elapsed} />}
         {error && <div className="error">{error}</div>}
 
-        {result && docs && (
+        <HistoryList rows={history} busy={historyBusy} activeId={comparison?.id}
+                     onOpen={openSaved} onDelete={removeSaved} />
+
+        {result && (
           <div className="results">
             <div className={`summary ${totalIssues === 0 && !busy ? 'summary-ok' : 'summary-diff'}`}>
               {totalIssues === 0 && !busy
@@ -780,7 +933,34 @@ function Workspace({ user }) {
               )}
             </div>
 
-            {diffs.length > 0 && (
+            {!docs && (
+              //файлы удалены по сроку хранения: развороты показать не на чем,
+              //но журнал согласования и отчёт остаются рабочими
+              <div className="journal">
+                <div className="journal-note">
+                  Исходные файлы этого сравнения удалены по сроку хранения
+                  ({FILE_TTL_DAYS} дней). Развороты показать нельзя, статусы
+                  согласования и отчёт доступны.
+                </div>
+                <table className="journal-table">
+                  <thead>
+                    <tr><th>Лист</th><th>Изменения</th><th>Статус</th><th>Комментарий</th></tr>
+                  </thead>
+                  <tbody>
+                    {reviewItems.map((it) => (
+                      <tr key={it.id}>
+                        <td>{it.page}</td>
+                        <td>{it.type}</td>
+                        <td>{it.status}</td>
+                        <td>{it.comment}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            {docs && diffs.length > 0 && (
               <div className="diffnav">
                 <button onClick={() => goTo(cur - 1)} aria-label="Предыдущее отличие">←</button>
                 <span className="diffnav-pos">Отличие {Math.min(cur + 1, diffs.length)} из {diffs.length}</span>
@@ -792,11 +972,13 @@ function Workspace({ user }) {
               </div>
             )}
 
-            <div className="hint">
-              Колесо мыши — масштаб, перетаскивание — перемещение по листу; оба документа двигаются синхронно.
-            </div>
+            {docs && (
+              <div className="hint">
+                Колесо мыши — масштаб, перетаскивание — перемещение по листу; оба документа двигаются синхронно.
+              </div>
+            )}
 
-            {entries.map((entry) => {
+            {docs && entries.map((entry) => {
               if (entry.kind === 'removed') {
                 return (
                   <SheetEntry key={`removed-${entry.i}`} docs={docs} side={1}
