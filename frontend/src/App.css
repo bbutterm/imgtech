@@ -312,6 +312,10 @@ button:disabled { opacity: 0.55; cursor: not-allowed; }
 .badge-ok { background: rgba(46, 125, 50, 0.15); color: #2e7d32; }
 .badge-diff { background: rgba(198, 40, 40, 0.15); color: #c62828; }
 .badge-warn { background: rgba(230, 145, 0, 0.15); color: #b26a00; }
+/* листы не совместились: это не «вот отличия», а требование проверить руками */
+.badge-stop { background: #b71c1c; color: #fff; }
+/* пояснение к автоматическому совмещению (поворот листа) */
+.badge-info { background: rgba(21, 101, 192, 0.15); color: #1565c0; }
 
 .pair-row {
   display: flex;
@@ -360,3 +364,58 @@ button:disabled { opacity: 0.55; cursor: not-allowed; }
   0%, 100% { box-shadow: 0 0 0 0 rgba(229, 57, 53, 0.55); }
   50% { box-shadow: 0 0 0 6px rgba(229, 57, 53, 0); }
 }
+
+/* история сравнений */
+.history { margin: 24px 0; }
+.history h3 { margin: 0 0 10px; font-size: 1rem; }
+.history-empty {
+  color: #666;
+  font-size: 0.9rem;
+  padding: 12px 14px;
+  background: rgba(0, 0, 0, 0.03);
+  border-radius: 8px;
+}
+.history-list { list-style: none; margin: 0; padding: 0; }
+.history-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  border-radius: 8px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+.history-item.active { border-color: #e53935; background: rgba(229, 57, 53, 0.04); }
+.history-files { font-weight: 600; word-break: break-word; }
+.history-meta { color: #666; font-size: 0.85rem; margin-top: 2px; }
+.history-actions { display: flex; gap: 8px; }
+.history-actions button {
+  padding: 6px 12px;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+.history-actions .link-danger {
+  background: transparent;
+  color: #b71c1c;
+  border: 1px solid rgba(183, 28, 28, 0.4);
+}
+.history-actions .link-danger:hover { background: rgba(183, 28, 28, 0.08); }
+
+/* журнал: сравнение открыто, но исходные файлы уже удалены по сроку */
+.journal { margin: 16px 0; }
+.journal-note {
+  padding: 10px 14px;
+  background: rgba(230, 145, 0, 0.12);
+  color: #b26a00;
+  border-radius: 8px;
+  margin-bottom: 12px;
+}
+.journal-table { border-collapse: collapse; width: 100%; font-size: 0.9rem; }
+.journal-table th, .journal-table td {
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  padding: 6px 10px;
+  text-align: left;
+}
+.journal-table th { background: rgba(0, 0, 0, 0.04); }
