@@ -1,3 +1,9 @@
+<img src="./docs/portfolio-cover.svg" width="900" alt="imgtech — PDF drawing revision review">
+
+**[Open demo](https://imgtech.vercel.app)** · **Project documentation**
+
+---
+
 # imgtech — сравнение версий PDF-чертежей
 
 Сервис принимает две версии PDF-комплекта (CAD-чертежи и текстовые листы),
